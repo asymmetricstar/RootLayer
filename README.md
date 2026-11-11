@@ -6,7 +6,7 @@
 [![Download Test Server](https://img.shields.io/badge/Client-Download-green)](https://github.com/asymmetricstar/RootLayer/releases/download/Download/RootLayer.1.0.0.0-x64-test-server.zip)
 
 # 🌐 RootLayer & SDN Engine
-### TAP-Based P2P Virtual LAN, Root DNS (Root/TLD) & VPS Management System
+### TAP-Based P2P Virtual LAN, Root DNS (Root/TLD) & Private Network Management System
 
 This system is a **Software-Defined Networking (SDN)** based virtual network and infrastructure ecosystem that brings physically separated machines together as if they were on the same local network (L2/L3 Virtual LAN), hosting its own independent and isolated **Private Root Name Space (Custom Root/TLD DNS)**.
 

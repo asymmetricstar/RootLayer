@@ -98,13 +98,13 @@ console.exe [--server IP] [--port N] [--timeout MS] <command> [arguments]
 Common commands:
 
 ```bash
-# Name records
-console.exe name add root.name 10.0.0.1 --ttl 60 --info root
+# Name records <domain>.<tld> <server_ip> e.g : (root.p2p -> 10.0.0.20)
+console.exe name add <domain>.<tld> 10.0.0.1 --ttl 60 --info root
 console.exe name list
-console.exe name del root.name
+console.exe name del <domain>.<tld>
 
-# TLD management
-console.exe tld add mesh
+# TLD management <tld> e.g : (new) -> (www.root.new) 
+console.exe tld add <tld>
 console.exe tld list
 
 # Issue a TLS server certificate (CN + SAN, incl. www. prefix)

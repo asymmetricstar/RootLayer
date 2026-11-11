@@ -1,5 +1,5 @@
 # Staging and infrastructure testing phase approaching source-code deployment.
-<img width="444" height="368" alt="screenshot-2026-11-11_08-40-42" src="https://github.com/user-attachments/assets/88284c45-2eea-4407-b6a9-245b49641a5c" />
+<img width="444" height="368" alt="screenshot-2026-11-11_12-30-24" src="https://github.com/user-attachments/assets/3f42c747-d217-4f9c-bc6b-d4214da97f38" />
 
 #### The initial test version is now live. If you encounter any bugs during your evaluation or have feature suggestions, ```please submit an issue or share your feedback to help us improve. ```
 [![Download Test Client](https://img.shields.io/badge/Server-Download-blue)](https://github.com/asymmetricstar/RootLayer/releases/download/Download/RootLayer.1.0.0.0-x64-test-client.zip)

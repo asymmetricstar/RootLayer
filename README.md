@@ -4,9 +4,6 @@
 #### The initial test version is now live. If you encounter any bugs during your evaluation or have feature suggestions, ```please submit an issue or share your feedback to help us improve. ```
 [![Download Test Client](https://img.shields.io/badge/Server-Download-blue)](https://github.com/asymmetricstar/RootLayer/releases/download/Download/RootLayer.1.0.0.0-x64-test-client.zip)
 [![Download Test Server](https://img.shields.io/badge/Client-Download-green)](https://github.com/asymmetricstar/RootLayer/releases/download/Download/RootLayer.1.0.0.0-x64-test-server.zip)
-[![help](https://img.shields.io/badge/Issue-feedback-red)](https://github.com/asymmetricstar/RootLayer/issues)
-
-
 
 # 🌐 RootLayer & SDN Engine
 ### TAP-Based P2P Virtual LAN, Root DNS (Root/TLD) & VPS Management System

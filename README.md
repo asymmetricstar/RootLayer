@@ -15,7 +15,7 @@ This system is a **Software-Defined Networking (SDN)** based virtual network and
 > 
 > Two independent network layers run **simultaneously** on the machine:
 > * **Public Internet Layer:** Your normal internet traffic, browsers, and public domain resolutions (`google.com`, `github.com`, etc.) continue to flow uninterrupted and at full speed via your existing local network.
-> * **Private Virtual LAN Layer:** Network traffic and private top-level domain resolutions specific to this network (`root.p2p`, `node.abc`, etc.) are securely handled and routed through the secondary virtual network created in the background.
+> * **Private Virtual LAN Layer:** Network traffic and private top-level domain resolutions specific to this network (`root.p2p`, `node.new`, etc.) are securely handled and routed through the secondary virtual network created in the background.
 
 ---
 
@@ -28,7 +28,7 @@ This system is a **Software-Defined Networking (SDN)** based virtual network and
 * **Persistent IP Allocation (Static DHCP):** Utilizing unique client identifiers (UUIDs), machines maintain the same virtual IP addresses even if the central server or VPS restarts.
 
 ### 2. Private Root & Top-Level Domain Name Server (Root & TLD Name Server)
-* **Isolated Name Space (Private TLDs):** Operates as a completely private DNS Root and TLD server closed to the public internet. Only clients connected to this virtual network can resolve custom extensions like `.p2p`, `.abc`, or `.name`.
+* **Isolated Name Space (Private TLDs):** Operates as a completely private DNS Root and TLD server closed to the public internet. Only clients connected to this virtual network can resolve custom extensions like `.p2p`, `.new`, or `.name`.
 * **Native Application Integration:** Resolved private domain names (e.g., root.p2p, storage.abc) are recognized at the operating system level, making them directly usable in web browsers (HTTP), ping commands, or remote desktop utilities.
 * **Hybrid DNS Query Management (Fallback):** The server solely handles network-specific TLD queries and seamlessly passes public internet domain queries (google.com, etc.) to the operating system's default DNS servers.
 
@@ -47,16 +47,10 @@ This system is a **Software-Defined Networking (SDN)** based virtual network and
 
 ---
 
-## 📂 Project Directory Structure
-
-```yaml
-<?>
-```
-*(Note: Because the system interacts with network drivers, appends system routes, and spawns virtual network adapters, both server and client components must be executed with **Administrator privileges**.)*
-
----
 
 ## 🚀 Quick Start Guide
+*(Note: Because the system interacts with network drivers, appends system routes, and spawns virtual network adapters, both server and client components must be executed with **Administrator privileges**.)*
+
 
 ### 1. Server (Central VPS / Name Server) Setup
 To initialize the central signaling and TLD routing, run the server application with administrator rights:
@@ -77,6 +71,58 @@ RootLayerClient.exe
 # Query/resolve a specific private name in a single step:
 RootLayerClient.exe --resolve node1.p2p
 ```
+
+---
+
+## 🔐 Certificate Authority & Server Certificates
+
+RootLayer ships an in-process Certificate Authority (CA) that issues TLS server certificates for registered names, so that services running inside the virtual network (e.g. `https://<domain>.<tld>/`) can serve HTTPS with a chain the tunnel clients already trust.
+
+* **CA persisted in cert.db:** The CA key and certificate are generated on first start and stored in `cert.db` (SQLite) next to the server executable. Issued certificates and the CA itself survive server restarts, so HTTPS endpoints keep validating without CA rotation.
+* **Server certificate issuance:** A name (e.g. `root.name`) can be issued a TLS server certificate (CN + SAN incl. `www.` prefix) valid for up to 3650 days, signed by the RootLayer CA. No prior domain registration is required.
+* **Automatic trust installation:** Clients fetch the CA over the signaling channel and install it into the Windows root trust store, so browsers and local applications trust RootLayer-issued certificates without manual steps.
+* **No CRL:** Forgotten certificates stay valid until they expire; rotating the CA (a fresh `cert.db`) is what invalidates everything.
+
+---
+
+### Console (`console.exe`) Usage
+*(Note: Because the system interacts with network drivers, appends system routes, and spawns virtual network adapters, both server and client components must be executed with **Administrator privileges**.)*
+
+
+`console.exe` is the server administration tool. It drives the running server over its admin protocol (loopback only) and never opens the databases directly.
+
+```bash
+console.exe [--server IP] [--port N] [--timeout MS] <command> [arguments]
+```
+
+Common commands:
+
+```bash
+# Name records
+console.exe name add root.name 10.0.0.1 --ttl 60 --info root
+console.exe name list
+console.exe name del root.name
+
+# TLD management
+console.exe tld add mesh
+console.exe tld list
+
+# Issue a TLS server certificate (CN + SAN, incl. www. prefix)
+console.exe cert issue <domain>.<tld> --out C:\file-server\certs
+console.exe cert issue <domain>.<tld> --name "Your Name" --mail YourName@<domain>.<tld> --city Istanbul --country Turkey --cc TR --days 397
+
+# Issue a certificate for a www-prefixed name like a [https://www.root.p2p] (no domain registration required)
+console.exe cert issue <sub>.<domain>.<tld> --out C:\file-server\certs --name "Your Name" --mail YourName@<domain>.<tld>
+
+# List / remove issued certificates
+console.exe cert list
+console.exe cert del <domain>.<tld>
+
+# Server info
+console.exe info
+```
+
+Issued certificates are written as `root.name.crt`, `root.name.key` and `rootlayer-ca.crt` into the `--out` directory (default: current directory). The certificate is also persisted in `cert.db` on the server.
 
 ---
 

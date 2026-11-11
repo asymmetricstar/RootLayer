@@ -1,5 +1,6 @@
 # Staging and infrastructure testing phase approaching deployment.
-<img width="1008" height="918" alt="image" src="https://github.com/user-attachments/assets/df6c65b2-6695-4518-a953-77b04c7f5b63" />
+
+<img width="444" height="368" alt="screenshot-2026-11-11_08-40-42" src="https://github.com/user-attachments/assets/88284c45-2eea-4407-b6a9-245b49641a5c" />
 
 # 🌐 RootLayer & SDN Engine
 ### TAP-Based P2P Virtual LAN, Root DNS (Root/TLD) & VPS Management System

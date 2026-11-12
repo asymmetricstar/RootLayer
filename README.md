@@ -127,10 +127,4 @@ Issued certificates are written as `root.name.crt`, `root.name.key` and `rootlay
 
 ---
 
-## 📄 LICENSE (Proprietary Source-Available License)
-
-Copyright (c) 2026. All rights reserved.
-
-1. **PROHIBITION OF MODIFICATION:** You may view and download the source code for personal, educational, or review purposes. However, you are strictly prohibited from modifying, altering, adapting, or creating derivative works based upon this software or its source code.
-2. **PROHIBITION OF COMMERCIAL USE AND SALE:** This software and its source code cannot be sold, rented, leased, licensed, or used for any commercial purposes, directly or indirectly, without the express written permission of the copyright holder.
-3. **DISTRIBUTION:** You may not redistribute this software or its source code on other platforms or package it as a commercial product.
+LICENSE (Apache-2.0)

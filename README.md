@@ -1,5 +1,5 @@
 # Staging and infrastructure testing phase approaching source-code deployment.
-### Source codes not include yet. (Included test builds client & server for windows-x64 platform)
+### **Source codes not include yet.** (Included test builds client & server for windows-x64 platform)
 <img width="444" height="368" alt="screenshot-2026-11-11_12-30-24" src="https://github.com/user-attachments/assets/3f42c747-d217-4f9c-bc6b-d4214da97f38" />
 
 

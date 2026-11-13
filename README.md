@@ -1,6 +1,10 @@
 # 🌐 RootLayer & SDN Engine
-
 <img width="444" height="368" alt="screenshot-2026-11-11_12-30-24" src="https://github.com/user-attachments/assets/3f42c747-d217-4f9c-bc6b-d4214da97f38" />
+
+## Donload Release 1.0.0
+### 💾 [win-x64-Server](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.0/build-server-1.0.0-x64-win.zip)
+### 💾 [win-x64-Client](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.0/build-client-1.0.0-x64-win.zip.zip)
+---
 
 ### TAP-Based P2P Virtual LAN, Root (DNS/TLD) & Private Network Management System
 RootLayer is a **Software-Defined Networking (SDN)** based virtual network and infrastructure ecosystem that brings physically separated machines together as if they were on the same local network (L2/L3 Virtual LAN), hosting its own independent and isolated **Private Root Name Space (Custom Root/TLD DNS)**.

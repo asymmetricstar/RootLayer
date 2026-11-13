@@ -3,7 +3,7 @@
 
 ## Donload Release 1.0.0
 ### 💾 [win-x64-Server](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.0/build-server-1.0.0-x64-win.zip)
-### 💾 [win-x64-Client](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.0/build-client-1.0.0-x64-win.zip.zip)
+### 💾 [win-x64-Client](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.0/build-client-1.0.0-x64-win.zip)
 ---
 
 ### TAP-Based P2P Virtual LAN, Root (DNS/TLD) & Private Network Management System

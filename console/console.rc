@@ -1,0 +1,45 @@
+// console/console.rc - identity of console.exe: icon + version block, so the
+// console gets its own icon and Details tab in Explorer, next to server.exe.
+// The icon path is relative to this .rc file (console/), so it keeps living in
+// the shared resources/icons folder.
+#include <windows.h>
+// Single source of the version numbers (shared with --version output).
+#include "version.h"
+
+// RT_MANIFEST (24), id 1: Windows reads this as the requested execution level,
+// so the console always starts elevated like server.exe.
+1 24 "console.manifest"
+
+101 ICON "../resources/icons/exe_console.ico"
+
+// Version block shown by Explorer (Properties -> Details) and by task tools.
+// Mirrors server.rc: same project and author, console-specific names.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION CONSOLE_VERSION_MAJOR,CONSOLE_VERSION_MINOR,CONSOLE_VERSION_PATCH,CONSOLE_VERSION_BUILD
+ PRODUCTVERSION CONSOLE_VERSION_MAJOR,CONSOLE_VERSION_MINOR,CONSOLE_VERSION_PATCH,CONSOLE_VERSION_BUILD
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "Author", "levent INAN"
+            VALUE "CompanyName", "levent INAN"
+            VALUE "FileDescription", "Root Layer Console"
+            VALUE "FileVersion", CONSOLE_VERSION_STRING4
+            VALUE "InternalName", "console"
+            VALUE "LegalCopyright", "levent INAN"
+            VALUE "OriginalFilename", "console.exe"
+            VALUE "ProductName", "Root Layer"
+            VALUE "ProductVersion", CONSOLE_VERSION_STRING4
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

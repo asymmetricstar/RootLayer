@@ -1,0 +1,82 @@
+// Caller holds ca_mutex().
+bool ensure_ca_impl() {
+    if (g_ca_key && g_ca_cert) return true;
+
+    const std::string exe_dir = get_exe_dir_server();
+    // 1) Try to load a persisted CA from disk so issued certificates keep
+    //    validating across server restarts (and browsers do not see a CA
+    //    rotation as an "invalid signature").
+    if (!exe_dir.empty()) {
+        std::ifstream kf(exe_dir + "\\\\ca.key", std::ios::binary);
+        std::ifstream cf(exe_dir + "\\\\ca.crt", std::ios::binary);
+        if (kf && cf) {
+            std::string key_pem((std::istreambuf_iterator<char>(kf)),
+                                std::istreambuf_iterator<char>());
+            std::string cert_pem((std::istreambuf_iterator<char>(cf)),
+                                 std::istreambuf_iterator<char>());
+            kf.close();
+            cf.close();
+
+            BIO* kbio = BIO_new_mem_buf(key_pem.data(), (int)key_pem.size());
+            BIO* cbio = BIO_new_mem_buf(cert_pem.data(), (int)cert_pem.size());
+            EVP_PKEY* pkey = kbio ? PEM_read_bio_PrivateKey(kbio, nullptr, nullptr, nullptr) : nullptr;
+            X509* cert = cbio ? PEM_read_bio_X509(cbio, nullptr, nullptr, nullptr) : nullptr;
+            if (kbio) BIO_free(kbio);
+            if (cbio) BIO_free(cbio);
+
+            bool ok = false;
+            if (pkey && cert) {
+                EVP_PKEY* cert_pub = X509_get_pubkey(cert);
+                if (cert_pub && EVP_PKEY_eq(pkey, cert_pub) == 1) {
+                    ok = true;
+                }
+                if (cert_pub) EVP_PKEY_free(cert_pub);
+            }
+
+            if (ok) {
+                g_ca_key = pkey;
+                g_ca_cert = cert;
+                g_ca_cert_pem = cert_pem.empty() ? pem_of_cert(cert) : cert_pem;
+                if (g_ca_cert_pem.empty()) g_ca_cert_pem = pem_of_cert(cert);
+                g_fingerprint = sha256_short(cert);
+                forget_issued();
+                return true;
+            }
+            if (pkey) EVP_PKEY_free(pkey);
+            if (cert) X509_free(cert);
+        }
+    }
+
+    // 2) Generate a fresh CA.
+    EVP_PKEY* pkey = generate_rsa_key(2048);
+    if (!pkey) return false;
+
+    X509* cert = create_self_signed_ca(pkey);
+    if (!cert) { EVP_PKEY_free(pkey); return false; }
+
+    g_ca_key = pkey;
+    g_ca_cert = cert;
+    g_ca_cert_pem = pem_of_cert(cert);
+    g_fingerprint = sha256_short(cert);
+    forget_issued();  // a brand new CA has signed nothing yet
+
+    // 3) Persist to disk (best effort) so the next start reuses it.
+    if (!exe_dir.empty()) {
+        BIO* bio = BIO_new(BIO_s_mem());
+        std::string key_pem;
+        if (bio && PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr, nullptr)) {
+            char* data = nullptr;
+            long n = BIO_get_mem_data(bio, &data);
+            if (data && n > 0) key_pem.assign(data, (size_t)n);
+        }
+        if (bio) BIO_free(bio);
+
+        std::ofstream kf(exe_dir + "\\\\ca.key", std::ios::binary | std::ios::trunc);
+        if (kf) { kf.write(key_pem.data(), (std::streamsize)key_pem.size()); kf.close(); }
+        std::ofstream cf(exe_dir + "\\\\ca.crt", std::ios::binary | std::ios::trunc);
+        if (cf) { cf.write(g_ca_cert_pem.data(), (std::streamsize)g_ca_cert_pem.size()); cf.close(); }
+    }
+
+    return true;
+}
+

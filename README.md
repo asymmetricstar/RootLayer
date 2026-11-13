@@ -3,10 +3,6 @@
 <img width="444" height="368" alt="screenshot-2026-11-11_12-30-24" src="https://github.com/user-attachments/assets/3f42c747-d217-4f9c-bc6b-d4214da97f38" />
 
 ### TAP-Based P2P Virtual LAN, Root (DNS/TLD) & Private Network Management System
-
-> **Status:** Staging and infrastructure testing phase. Source code will be published soon.
-> **Current release:** Test builds for Windows x64 (Client & Server) are included. Source code is not included yet.
-
 RootLayer is a **Software-Defined Networking (SDN)** based virtual network and infrastructure ecosystem that brings physically separated machines together as if they were on the same local network (L2/L3 Virtual LAN), hosting its own independent and isolated **Private Root Name Space (Custom Root/TLD DNS)**.
 
 The initial test version is now live. If you encounter any bugs during your evaluation or have feature suggestions, please submit an issue or share your feedback to help us improve.

@@ -1,7 +1,7 @@
 # 🌐 RootLayer & SDN Engine
 <img width="444" height="368" alt="screenshot-2026-11-11_12-30-24" src="https://github.com/user-attachments/assets/3f42c747-d217-4f9c-bc6b-d4214da97f38" />
 
-## Donload Release 1.0.0
+## Download Binary 1.0.0
 ### 💾 [win-x64-Server](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.0/build-server-1.0.0-x64-win.zip)
 ### 💾 [win-x64-Client](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.0/build-client-1.0.0-x64-win.zip)
 ---

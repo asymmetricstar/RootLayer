@@ -2,6 +2,8 @@
 
 RootLayer is a Windows-focused, software-defined networking (SDN) project that provides a **virtual internet infrastructure**: a private, managed overlay network for physically separated machines. It combines a TAP/based overlay network with a private root/TLD name space, so connected nodes can communicate using virtual IP addresses and private hostnames as if they were part of the same local network.
 
+<img width="444" height="368" alt="screenshot-2026-11-15_16-38-10" src="https://github.com/user-attachments/assets/941e32d3-c968-49ef-89ea-751fdd83f30f" />
+
 ## Download Release 1.0.5
 ### 💾 [win-x64-Server](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.5/build-server-1.0.5-x64-win.zip)
 ### 💾 [win-x64-Client](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.5/build-client-1.0.5-x64-win.zip)

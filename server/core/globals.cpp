@@ -6,8 +6,6 @@ int signaling_port = 40000;
 int relay_port = 40001;
 bool gateway_enabled = true;
 bool nat_enabled = false;
-std::string virtual_ip_prefix = "10.0.0.";  // e.g. "10.0.0."
-int virtual_ip_start_octet = 1;             // e.g. 1 -> 10.0.0.1
 
 // Scalable IP distribution: supports /24 (default) up to /16 and beyond.
 // All internal IP math uses uint32 (host byte order).
@@ -60,7 +58,25 @@ std::mutex db_mutex;
 // (our own TLD, like Tor's .onion) away from the identity table.
 sqlite3* arpa_db = NULL;
 std::mutex arpa_mutex;
-HANDLE gateway_tap = INVALID_HANDLE_VALUE;
+namespace {
+
+// Guarded: the admin console can replace the message while clients register.
+std::mutex g_motd_mutex;
+std::string g_server_motd;
+
+}  // namespace
+
+std::string server_motd_value() {
+    std::lock_guard<std::mutex> lock(g_motd_mutex);
+    return g_server_motd;
+}
+
+void set_server_motd(const std::string& text) {
+    std::lock_guard<std::mutex> lock(g_motd_mutex);
+    g_server_motd = text;
+}
+
+std::atomic<bool> gateway_active(false);
 std::string gateway_adapter_name;
 SOCKET relay_sock = INVALID_SOCKET;
 std::atomic<bool> relay_running(true);
@@ -90,5 +106,12 @@ std::string narrow(const std::wstring& text) {
 std::mutex sessions_mutex;
 std::vector<std::shared_ptr<Session>> online;
 std::set<std::string> active_ips;
+std::unordered_map<std::string, std::shared_ptr<Session>> sessions_by_ip;
+std::unordered_map<unsigned long long, std::shared_ptr<Session>> sessions_by_endpoint;
+
+unsigned long long endpoint_key(const sockaddr_in& address) {
+    return ((unsigned long long)ntohl(address.sin_addr.s_addr) << 16) |
+           (unsigned long long)ntohs(address.sin_port);
+}
 
 uint32_t server_local_ip_u32 = 0;

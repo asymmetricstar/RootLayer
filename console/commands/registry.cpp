@@ -25,6 +25,9 @@ void register_all_commands() {
     register_tld_commands();
     register_cert_commands();
     register_server_commands();
+    register_limit_commands();
+    register_ip_commands();
+    register_config_commands();
 
     std::sort(command_registry().begin(), command_registry().end(),
               [](const Command* left, const Command* right) {

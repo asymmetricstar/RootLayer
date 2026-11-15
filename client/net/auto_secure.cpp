@@ -344,13 +344,12 @@ bool ensure_client_auto_security() {
         EVP_PKEY* key = generate_rsa_key(2048);
         if (key) {
             // CN is the virtual IP the server assigned for this session; the
-            // identity is sent alongside so the server can still report the
-            // certificate for this client.
+            // hardware id is the fallback name before an address exists.
             CertificateProfile profile;
             profile.common_name = !virtual_ip.empty()
                                       ? virtual_ip
-                                      : (client_identity.empty() ? std::string("rootlayer-client")
-                                                                 : client_identity);
+                                      : (client_hw_id.empty() ? std::string("rootlayer-client")
+                                                             : client_hw_id);
             profile.email = profile_email;
             profile.name = profile_full_name;
             profile.city = profile_city;
@@ -361,9 +360,6 @@ bool ensure_client_auto_security() {
             std::string cert_pem;
             if (!csr_pem.empty()) {
                 std::string request = "CSR:" + b64_encode(csr_pem);
-                if (!client_identity.empty()) {
-                    request += " IDENTITY:" + client_identity;
-                }
                 std::string resp = request_response(request);
                 answered = !resp.empty();
                 cert_pem = b64_decode(extract_token_line(resp, "CERT"));

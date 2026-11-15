@@ -4,6 +4,7 @@
 #include "core/utils.h"
 #include "core/json.h"
 #include "tap/tap.h"
+#include "netdev/wintun.h"
 
 // True when the named adapter currently owns the given IPv4 address.
 bool adapter_has_ipv4(const std::string& adapter_name, const std::string& ip) {
@@ -129,13 +130,17 @@ void prepare_tap_adapter(const std::string& adapter) {
     const std::string icmp_rule_name = "P2P VPN TAP ICMP";
     // Interface rules do not cover ICMP: without this, an inbound echo request
     // on the tunnel adapter is dropped and peers cannot ping each other.
-    std::string fw_script = "if (-not (Get-NetFirewallRule -DisplayName '" + rule_name +
-        "' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName '" + rule_name +
-        "' -Direction Inbound -Action Allow -InterfaceAlias '" + adapter + "' -Profile Any | Out-Null }; "
-        "if (-not (Get-NetFirewallRule -DisplayName '" + icmp_rule_name +
-        "' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName '" + icmp_rule_name +
+    //
+    // Both rules are rebuilt on every run: a same-named rule left behind by an
+    // earlier adapter would make the "rule exists" check skip the new binding,
+    // and the current tunnel interface would then have no ICMP allowance.
+    std::string fw_script = "Remove-NetFirewallRule -DisplayName '" + rule_name + "','" +
+        icmp_rule_name + "' -ErrorAction SilentlyContinue; "
+        "New-NetFirewallRule -DisplayName '" + rule_name +
+        "' -Direction Inbound -Action Allow -InterfaceAlias '" + adapter + "' -Profile Any | Out-Null; "
+        "New-NetFirewallRule -DisplayName '" + icmp_rule_name +
         "' -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -InterfaceAlias '" + adapter +
-        "' -Profile Any | Out-Null }";
+        "' -Profile Any | Out-Null";
 
     std::string fw_output;
     long long fw_exit = run_program_captured(powershell_path,
@@ -159,44 +164,24 @@ void prepare_tap_adapter(const std::string& adapter) {
     }
 }
 
+// Opens the packet ring of the adapter created by ensure_tap_adapter(). The
+// session, not a device handle, is what the tunnel pumps read from and write to.
 bool open_tap_device(const std::string& tap_name) {
-    // FILE_FLAG_OVERLAPPED: with synchronous I/O a pending ReadFile makes every
-    // concurrent WriteFile on the same TAP handle wait (measured 0.4-2.8 s per
-    // frame), so incoming tunnel traffic crawled and the queue backed up.
-    tap_device = CreateFileA(
-        tap_name.c_str(),
-        GENERIC_READ | GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_OVERLAPPED,
-        NULL
-    );
-
-    if (tap_device == INVALID_HANDLE_VALUE) {
-        json_event("error", "\"code\":\"tap_open_failed\",\"win_error\":" + std::to_string(GetLastError()));
+    (void)tap_name;  // the session is bound to the adapter, not to a path
+    if (!netdev::start_session()) {
+        json_event("error", std::string("\"code\":\"wintun_session_failed\",") +
+                                json_string_field("detail", netdev::error_text()));
         return false;
     }
-
+    json_event("info", "\"code\":\"wintun_session_started\"");
     return true;
 }
 
-// A freshly opened TAP adapter starts in the "disconnected" state and would
-// drop every packet until the media status is set to connected.
+// Wintun has no media-status ioctl: the adapter is "connected" exactly while a
+// session is open, so this only reports the current state.
 bool set_tap_media_status(bool connected) {
-    if (tap_device == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-
-    ULONG status = connected ? 1 : 0;
-    DWORD returned = 0;
-    if (!DeviceIoControl(tap_device, TAP_WIN_IOCTL_SET_MEDIA_STATUS,
-                         &status, sizeof(status), &status, sizeof(status),
-                         &returned, NULL)) {
-        json_event("error", "\"code\":\"tap_media_status_failed\",\"win_error\":" + std::to_string(GetLastError()));
-        return false;
-    }
-    return true;
+    (void)connected;
+    return netdev::is_open();
 }
 
 // --- Virtual TLD resolution (NRPT) -----------------------------------------
@@ -260,8 +245,10 @@ static bool run_powershell(const std::string& script) {
 
 // Only the rules this client created are touched, so a rule left over from an
 // earlier gateway address or TLD set can never survive.
+// -Name is the internal rule id (a GUID); the label this client writes is the
+// rule's DisplayName, so both the cleanup and the lookup match on that.
 static const char* kRemoveDnsRules =
-    "Get-DnsClientNrptRule | Where-Object { $_.Name -like 'RootLayerTunnel:*' } | "
+    "Get-DnsClientNrptRule | Where-Object { $_.DisplayName -like 'RootLayerTunnel:*' } | "
     "Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue;";
 
 void set_tunnel_dns_namespaces(const std::vector<std::string>& namespaces) {
@@ -280,7 +267,9 @@ void apply_tunnel_dns_rules(const std::string& gateway) {
     std::string script = kRemoveDnsRules;
     if (usable) {
         for (const auto& suffix : namespaces) {
-            script += " Add-DnsClientNrptRule -Name 'RootLayerTunnel:" + suffix +
+            // -Name is ambiguous on Add-DnsClientNrptRule (it also matches
+            // -NameServers/-NameEncoding); -DisplayName is the rule label.
+            script += " Add-DnsClientNrptRule -DisplayName 'RootLayerTunnel:" + suffix +
                       "' -Namespace '." + suffix + "' -NameServers " + gateway +
                       " -ErrorAction SilentlyContinue;";
         }

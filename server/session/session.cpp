@@ -14,6 +14,10 @@
 #include "session/session.h"
 #include "gateway/gateway.h"
 
+#include <ctime>
+#include <map>
+#include <mutex>
+
 namespace {
 
 // A usable pool address: inside the client range and not the server's own
@@ -46,13 +50,22 @@ bool claim_active_ip(const std::string& ip) {
     return active_ips.insert(ip).second;
 }
 
-std::string static_ip_for(const std::string& identity, const std::string& exclude) {
+// Address rows are keyed by the hardware id, so a machine keeps its address
+// even if it is reinstalled with a different static identity string.
+std::string client_db_key(const std::string& hw_id, const std::string& identity) {
+    return hw_id.empty() ? identity : hw_id;
+}
+
+std::string static_ip_for(const std::string& client_key, const std::string& exclude) {
+    if (client_key.empty()) {
+        return "";
+    }
     // One query for everything already spoken for: the candidate screen below
     // then runs in memory instead of one SQL round trip per address (a /16
     // pool would otherwise issue up to 65k queries for a single client).
     std::unordered_set<std::string> taken = db_taken_ips();
 
-    std::string existing = db_lookup_ip(identity);
+    std::string existing = db_lookup_ip(client_key);
     if (!existing.empty()) {
         const bool usable = existing != exclude && !ip_active(existing) &&
                             ip_in_pool(string_to_ip(existing));
@@ -62,8 +75,8 @@ std::string static_ip_for(const std::string& identity, const std::string& exclud
         // Stale rows (outside the usable range after a config change, or the
         // server address) and addresses seized by another session must not be
         // handed out - otherwise the client TAP configures an out-of-segment
-        // IP and local ping never routes. Remap this identity instead.
-        std::cerr << "Static address " << existing << " for " << identity
+        // IP and local ping never routes. Remap this client instead.
+        std::cerr << "Persisted address " << existing << " for " << client_key
                   << " is stale or in use; assigning a free one" << std::endl;
     }
 
@@ -76,7 +89,7 @@ std::string static_ip_for(const std::string& identity, const std::string& exclud
         if (!ip_free(candidate, exclude, taken)) {
             continue;
         }
-        if (db_save_ip(identity, candidate)) {
+        if (db_save_ip(client_key, candidate)) {
             return candidate;
         }
         taken.insert(candidate);
@@ -110,16 +123,102 @@ std::string random_ip(const std::string& exclude) {
     return "";
 }
 
-std::string assign_virtual_ip(const std::string& identity, const std::string& exclude) {
-    if (!identity.empty()) {
-        return static_ip_for(identity, exclude);
+std::string assign_virtual_ip(const std::string& client_key, const std::string& exclude) {
+    if (!client_key.empty()) {
+        return static_ip_for(client_key, exclude);
     }
     return random_ip(exclude);
 }
+void index_session(const std::shared_ptr<Session>& session) {
+    if (!session) return;
+    if (!session->virtual_ip.empty()) {
+        sessions_by_ip[session->virtual_ip] = session;
+    }
+    if (session->endpoint_known) {
+        sessions_by_endpoint[endpoint_key(session->endpoint)] = session;
+    }
+}
+
+void unindex_session(const std::shared_ptr<Session>& session) {
+    if (!session) return;
+    auto ip_entry = sessions_by_ip.find(session->virtual_ip);
+    if (ip_entry != sessions_by_ip.end() && ip_entry->second == session) {
+        sessions_by_ip.erase(ip_entry);
+    }
+    if (session->endpoint_known) {
+        auto ep_entry = sessions_by_endpoint.find(endpoint_key(session->endpoint));
+        if (ep_entry != sessions_by_endpoint.end() && ep_entry->second == session) {
+            sessions_by_endpoint.erase(ep_entry);
+        }
+    }
+}
+
+namespace {
+
+// Last time each client key was heard from. Its own lock: the admin console
+// reads it while the relay holds sessions_mutex.
+std::mutex g_last_seen_mutex;
+std::map<std::string, long long> g_last_seen;
+
+}  // namespace
+
+void note_client_seen(const std::string& client_key) {
+    if (client_key.empty()) return;
+    std::lock_guard<std::mutex> lock(g_last_seen_mutex);
+    g_last_seen[client_key] = (long long)std::time(NULL);
+}
+
+long long client_last_seen(const std::string& client_key) {
+    if (client_key.empty()) return 0;
+    std::lock_guard<std::mutex> lock(g_last_seen_mutex);
+    auto hit = g_last_seen.find(client_key);
+    return hit == g_last_seen.end() ? 0 : hit->second;
+}
+
+std::string session_key_for_ip(const std::string& ip) {
+    if (ip.empty()) return "";
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    auto hit = sessions_by_ip.find(ip);
+    if (hit == sessions_by_ip.end() || !hit->second) return "";
+    return client_db_key(hit->second->hw_id, hit->second->identity);
+}
+
+size_t online_member_count() {
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    size_t count = 0;
+    for (const auto& session : online) {
+        if (!session || session->retired) continue;
+        ++count;
+    }
+    return count;
+}
+
+// Same takeover the reconnect path uses: mark retired and close the control
+// socket, which makes the client reconnect (release_session logs CLOSED).
+bool retire_sessions_for_key(const std::string& client_key) {
+    if (client_key.empty()) return false;
+    bool retired = false;
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    for (const auto& session : online) {
+        if (!session || session->retired) continue;
+        if (client_db_key(session->hw_id, session->identity) != client_key) continue;
+        session->retired = true;
+        if (session->sock != INVALID_SOCKET) {
+            closesocket(session->sock);
+        }
+        retired = true;
+    }
+    return retired;
+}
+
 void flood_to_sessions(const char* data, int len, const std::shared_ptr<Session>& except) {
     std::lock_guard<std::mutex> lock(sessions_mutex);
     for (const auto& session : online) {
         if (!session->endpoint_known || session == except) {
+            continue;
+        }
+        // Per-client download cap, same bucket the relay uses.
+        if (!session->download.allow((size_t)len)) {
             continue;
         }
         sendto(relay_sock, data, len, 0, (sockaddr*)&session->endpoint, sizeof(session->endpoint));

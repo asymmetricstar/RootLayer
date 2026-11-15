@@ -20,7 +20,8 @@ LDFLAGS = -lws2_32 -liphlpapi -lsetupapi -lnetapi32 -lshell32 -ladvapi32 -lgdipl
 #   dns/ name server | session/ sessions + IP assignment | gateway/ TAP
 #   net/ relay + signaling | main.cpp startup + accept loop
 SERVER_SRCS = server/main.cpp \
-              server/core/globals.cpp server/core/config.cpp server/core/utils.cpp \
+              server/core/globals.cpp server/core/config.cpp server/core/utils.cpp server/core/log.cpp server/core/guard.cpp server/core/limits.cpp \
+              server/net/net.cpp server/net/control.cpp server/net/signaling.cpp \
               server/db/store.cpp server/db/write_queue.cpp \
               server/arpa/arpa.cpp \
               server/dns/dns.cpp \
@@ -28,13 +29,14 @@ SERVER_SRCS = server/main.cpp \
               server/gateway/gateway.cpp \
               server/ca/ca.cpp \
               server/admin/admin.cpp \
-              server/net/net.cpp
+              service/winservice.cpp netdev/wintun.cpp
 
 server: $(SERVER_SRCS) server/sqlite/sqlite3.c server/resources/server.rc server/resources/server.manifest
 	@mkdir -p $(BIN) $(OBJ)
 	$(CC) -O2 -c server/sqlite/sqlite3.c -o $(OBJ)/sqlite3.o
 	$(WINDRES) -J rc -O coff server/resources/server.rc $(OBJ)/server.res
 	$(CXX) $(SERVER_CXXFLAGS) -o $(BIN)/server.exe $(SERVER_SRCS) $(OBJ)/sqlite3.o $(OBJ)/server.res $(LDFLAGS) -lcrypto -lcrypt32
+	@cp -f resources/wintun/bin/amd64/wintun.dll $(BIN)/
 
 # Client
 # NOTE: the executable is named client.exe (project: RootLayer).
@@ -61,7 +63,8 @@ CLIENT_SRCS = client/client.cpp \
               client/net/signaling.cpp client/net/tunnel.cpp client/net/resolve.cpp \
               client/net/auto_secure.cpp \
               client/ui/tray.cpp client/ui/panel.cpp \
-              client/ui/ui_panel_qt.cpp
+              client/ui/ui_panel_qt.cpp \
+              service/winservice.cpp netdev/wintun.cpp
 CLIENT_HDRS = $(wildcard client/core/*.h client/tap/*.h client/net/*.h client/ui/*.h)
 
 client: $(CLIENT_SRCS) $(CLIENT_HDRS) client/client.rc client/client.manifest
@@ -69,6 +72,7 @@ client: $(CLIENT_SRCS) $(CLIENT_HDRS) client/client.rc client/client.manifest
 	$(WINDRES) -J rc -O coff client/client.rc $(OBJ)/client.res
 	$(CXX) $(CLIENT_CXXFLAGS) $(QT_CFLAGS) -o $(BIN)/client.exe $(CLIENT_SRCS) $(OBJ)/client.res $(LDFLAGS) $(QT_LIBS) -lcrypto -lcrypt32 -mwindows
 	@mkdir -p $(BIN)/resources; cp -r resources/. $(BIN)/resources/; rm -f $(BIN)/resources/icons/*.psd
+	@cp -f resources/wintun/bin/amd64/wintun.dll $(BIN)/
 
 # Copy the Qt runtime next to the executable so it starts without MSYS2 on PATH.
 deploy-client: client

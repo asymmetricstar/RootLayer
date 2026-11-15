@@ -10,7 +10,12 @@
 #include "session/session.h"
 #include "gateway/gateway.h"
 #include "net/net.h"
+#include "net/signaling.h"
 #include "ca/ca.h"
+#include "core/log.h"
+#include "core/guard.h"
+#include "core/limits.h"
+#include "service/winservice.h"
 
 const int kStartupSteps = 8;
 
@@ -37,7 +42,7 @@ static BOOL WINAPI on_console_control(DWORD type) {
     return FALSE;
 }
 
-int main() {
+static int run_server() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "RootLayer Server" << std::endl;
     SetConsoleCtrlHandler(on_console_control, TRUE);
@@ -81,7 +86,8 @@ int main() {
     startup_ok();
 
     // Network first: adapter, gateway address, MTU, firewall and NAT.
-    startup_begin(5, "TAP adapter, gateway " + server_virtual_ip() + ", firewall and NAT");
+    startup_begin(5, "Tunnel adapter (Wintun), gateway " + server_virtual_ip() +
+                         ", firewall and NAT");
     bool gateway_ready = true;
     std::string gateway_note;
     if (!gateway_enabled) {
@@ -186,46 +192,118 @@ int main() {
         std::thread(dns_thread).detach();
         std::thread(dns_tcp_thread).detach();
     }
+    // Shield housekeeping: rolls the load window, adapts the packet budget and
+    // writes the periodic GUARD line for as long as the server runs.
+    std::thread([] {
+        while (relay_running) {
+            guard::tick();
+            Sleep(1000);
+        }
+    }).detach();
     server_ready = true;
     startup_ok();
 
-    std::cout << "      Signaling: TCP " << signaling_port << "   Relay: UDP " << relay_port << std::endl;
-    if (name_service) {
-        std::cout << "      DNS: UDP+TCP 53 (*.";
-        for (const auto& suf : arpa_suffixes) std::cout << " " << suf;
-        std::cout << ")" << std::endl;
+    srvlog::section("Server ready");
+    {
+        double up = 0.0;
+        double down = 0.0;
+        limits::defaults(up, down);
+        auto kbps = [](double bytes_per_sec) {
+            return bytes_per_sec > 0.0
+                       ? std::to_string((long long)(bytes_per_sec * 8.0 / 1000.0)) + " kbit/s"
+                       : std::string("unlimited");
+        };
+        srvlog::item("Client band", "up " + kbps(up) + ", down " + kbps(down));
     }
-    std::cout << "      Gateway " << server_virtual_ip() << "   Pool from "
-              << virtual_ip_prefix << (virtual_ip_start_octet + 1) << std::endl;
-    std::cout << "      Certificate: " << ca::status() << std::endl;
-    std::cout << "      Write buffer: " << db_write_stats() << " | " << arpa_write_stats() << std::endl;
-    if (gateway_ready) {
-        std::cout << "\xE2\x9C\x85 Ready Server" << std::endl;
+    srvlog::item("Signaling", "TCP " + std::to_string(signaling_port));
+    srvlog::item("Relay", "UDP " + std::to_string(relay_port));
+    srvlog::item("Network", ip_to_string(virtual_ip_network) + "/" +
+                                 std::to_string(virtual_ip_prefix_len) + " (" +
+                                 ip_to_string(virtual_ip_mask) + ")");
+    srvlog::item("Gateway", server_virtual_ip());
+    if (virtual_ip_first_client <= virtual_ip_last) {
+        srvlog::item("Client pool", ip_to_string(virtual_ip_first_client) + " - " +
+                                        ip_to_string(virtual_ip_last) + " (" +
+                                        std::to_string(virtual_ip_last -
+                                                       virtual_ip_first_client + 1) +
+                                        " addresses)");
     } else {
-        std::cout << "\xE2\x9A\xA0\xEF\xB8\x8F Ready Server (relay only): " << gateway_note << std::endl;
+        srvlog::item("Client pool", "empty");
     }
+    if (name_service) {
+        std::string dns = "UDP+TCP 53";
+        for (const auto& suffix : arpa_suffixes) {
+            dns += "  *." + suffix;
+        }
+        srvlog::item("DNS", dns);
+    } else {
+        srvlog::item("DNS", "disabled");
+    }
+    srvlog::item("Certificate", ca::status());
+    srvlog::item("Write buffer", db_write_stats() + " | " + arpa_write_stats());
+    srvlog::item("Shield", guard::stats());
+    {
+        const guard::Settings limits = guard::settings();
+        srvlog::item("Shield limits",
+                     "budget " + std::to_string(limits.min_pps) + "-" +
+                         std::to_string(limits.max_budget_pps) + " pps, per sender " +
+                         std::to_string(limits.per_ip_pps) + " pps, " +
+                         std::to_string(limits.connect_limit) + " connects/" +
+                         std::to_string(limits.connect_window_sec) + "s, " +
+                         std::to_string(limits.source_table) + " sources kept " +
+                         std::to_string(limits.source_idle_sec) + "s");
+    }
+
+    if (gateway_ready) {
+        std::cout << "\n\xE2\x9C\x85 Ready Server" << std::endl;
+    } else {
+        std::cout << "\n\xE2\x9A\xA0\xEF\xB8\x8F Ready Server (relay only): " << gateway_note
+                  << std::endl;
+    }
+
+    srvlog::section("Client events");
+    srvlog::events_header();
     std::cout << std::flush;
 
-    for (;;) {
-        sockaddr_in client_addr;
-        int client_len = sizeof(client_addr);
-        SOCKET client_sock = accept(listen_sock, (sockaddr*)&client_addr, &client_len);
-
-        if (client_sock == INVALID_SOCKET) {
-            std::cerr << "Accept failed: " << WSAGetLastError() << std::endl;
-            continue;
-        }
-
-        // Reading the request must not block the accept loop.
-        DWORD io_timeout = 10000;
-        setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&io_timeout, sizeof(io_timeout));
-
-        std::thread(handle_client, client_sock, client_addr).detach();
-    }
+    // Control plane: one poll loop owns every connection, so each client costs
+    // a buffer plus a poll entry instead of a thread. A slow or half-open peer
+    // can only stall its own connection. Returns when the server stops.
+    signaling_run(listen_sock);
 
     relay_running = false;
     closesocket(listen_sock);
     closesocket(relay_sock);
     WSACleanup();
     return 0;
+}
+
+// --- Windows service ---------------------------------------------------------
+// "server.exe --service start|stop|status" installs/removes the automatic-start
+// service; the SCM itself starts the program with "--service run" and runs the
+// normal body below as LocalSystem.
+static void service_on_stop() {
+    // The signaling loop is inside WSAPoll(), so a stop cannot unwind it from
+    // here. The pending writes are flushed synchronously and the handler ends
+    // the process right after.
+    flush_all_databases();
+}
+
+static winservice::Config service_config() {
+    winservice::Config config;
+    config.name = "RootLayerServer";
+    config.display_name = "RootLayer Server";
+    config.description =
+        "RootLayer virtual LAN gateway, relay, DNS name server and certificate authority.";
+    config.run_app = run_server;
+    config.on_stop = service_on_stop;
+    return config;
+}
+
+int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+    if (winservice::requested()) {
+        return winservice::handle(service_config());
+    }
+    return run_server();
 }

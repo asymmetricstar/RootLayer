@@ -21,7 +21,9 @@ void attach_parent_console();
 // client.ini create/load + static identity handling.
 bool ensure_client_ini_exists(const std::string& ini_file);
 bool load_config_from_ini(const std::string& ini_file);
-void ensure_client_identity(const std::string& ini_full_path);
+// Writes the permanent hardware id (02:xx:xx:xx:xx:xx) into client.ini when the
+// file does not carry one yet; it never changes afterwards.
+void ensure_client_hw_id(const std::string& ini_full_path);
 
 std::string trim(const std::string& text);
 std::wstring widen(const std::string& text);

@@ -26,11 +26,14 @@ bool g_qt_ui = false;
 
 // Members reported by the server for the shared segment (shown in the panel).
 std::atomic<int> peer_count(0);
+std::atomic<int> band_up_kbps(0);    // 0 = unlimited
+std::atomic<int> band_down_kbps(0);
 
-// static=1 in client.ini: the client sends a stable identity so the server
-// always assigns the same virtual IP.
-int static_enabled = 0;
-std::string client_identity;
+// Message of the day from the server, shown in the panel header.
+std::string server_motd;
+
+// The server keeps a client's address, so the hardware id alone identifies it.
+std::string client_hw_id;
 
 // Certificate subject profile: shown in the client certificate (O, E, L, ST,
 // C). The CN is the virtual IP, filled in at enrollment time.
@@ -51,7 +54,7 @@ bool headless_mode = false;
 std::string resolve_name;
 
 SOCKET udp_sock = INVALID_SOCKET;
-HANDLE tap_device = INVALID_HANDLE_VALUE;
+
 
 // Tunnel counters, reported as a "stats" event every few seconds.
 std::atomic<unsigned long long> frames_from_tap(0);

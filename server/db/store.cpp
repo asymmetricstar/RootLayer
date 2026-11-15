@@ -21,6 +21,7 @@
 #include "db/store.h"
 #include "db/write_queue.h"
 
+#include <algorithm>
 #include <map>
 
 namespace {
@@ -351,6 +352,104 @@ bool db_save_ip(const std::string& identity, const std::string& ip) {
     return true;
 }
 
+// One-time migration of a pre-hw-id row. Runs under db_mutex; the row move is
+// queued so the connection path stays off the disk.
+bool db_adopt_key(const std::string& old_key, const std::string& new_key) {
+    if (client_db == NULL || old_key.empty() || new_key.empty() || old_key == new_key) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(db_mutex);
+
+    // Address the old key owns: the in-memory intent is newer than the file.
+    std::string old_ip;
+    auto pending = g_pending_claims.find(old_key);
+    if (pending != g_pending_claims.end()) {
+        old_ip = pending->second;
+    }
+    if (old_ip.empty()) {
+        sqlite3_stmt* stmt = NULL;
+        if (sqlite3_prepare_v2(client_db, "SELECT ip FROM client_ips WHERE identity = ?1", -1,
+                               &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, old_key.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char* text = sqlite3_column_text(stmt, 0);
+                if (text != NULL) old_ip = reinterpret_cast<const char*>(text);
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+    if (old_ip.empty()) {
+        return false;
+    }
+
+    // Does the hardware id already have an address of its own?
+    std::string new_ip;
+    auto new_pending = g_pending_claims.find(new_key);
+    if (new_pending != g_pending_claims.end()) {
+        new_ip = new_pending->second;
+    } else {
+        sqlite3_stmt* stmt = NULL;
+        if (sqlite3_prepare_v2(client_db, "SELECT ip FROM client_ips WHERE identity = ?1", -1,
+                               &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, new_key.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char* text = sqlite3_column_text(stmt, 0);
+                if (text != NULL) new_ip = reinterpret_cast<const char*>(text);
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    // The old row goes away in both cases; only the address is handed over when
+    // the new key has none. A distinct queue key keeps this write from
+    // colliding with the address claim of the same client.
+    const std::string delete_key = std::string(1, '\x01') + "adopt:" + old_key;
+
+    if (!new_ip.empty()) {
+        // Leftover of an earlier era: drop it so the address returns to the pool.
+        g_write_queue.enqueue(delete_key, [old_key] {
+            sqlite3_stmt* del = NULL;
+            if (sqlite3_prepare_v2(client_db, "DELETE FROM client_ips WHERE identity = ?1", -1,
+                                   &del, NULL) != SQLITE_OK) {
+                return !store_retryable();
+            }
+            sqlite3_bind_text(del, 1, old_key.c_str(), -1, SQLITE_TRANSIENT);
+            const int rc = sqlite3_step(del);
+            sqlite3_finalize(del);
+            return rc == SQLITE_DONE || !store_retryable();
+        });
+        return true;
+    }
+
+    // Hand the address over: forget the old claim, claim it for the new key.
+    g_pending_claims.erase(old_key);
+    auto reverse = g_pending_owner_by_ip.find(old_ip);
+    if (reverse != g_pending_owner_by_ip.end() && reverse->second == old_key) {
+        g_pending_owner_by_ip.erase(reverse);
+    }
+    g_pending_claims[new_key] = old_ip;
+    g_pending_owner_by_ip[old_ip] = new_key;
+
+    g_write_queue.enqueue(new_key, [old_key, new_key] {
+        // Delete the legacy row first: the UNIQUE index on ip would reject the
+        // new row while the old one still holds that address.
+        sqlite3_stmt* del = NULL;
+        if (sqlite3_prepare_v2(client_db, "DELETE FROM client_ips WHERE identity = ?1", -1,
+                               &del, NULL) != SQLITE_OK) {
+            return !store_retryable();
+        }
+        sqlite3_bind_text(del, 1, old_key.c_str(), -1, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(del);
+        sqlite3_finalize(del);
+        if (rc != SQLITE_DONE && store_retryable()) {
+            return false;
+        }
+        return flush_claim_locked(new_key);
+    });
+    return true;
+}
+
 std::unordered_set<std::string> db_taken_ips() {
     std::unordered_set<std::string> taken;
     std::lock_guard<std::mutex> lock(db_mutex);
@@ -406,4 +505,98 @@ void db_prune_stale_rows() {
             std::cerr << "Pruned stale identity row: " << id << std::endl;
         }
     }
+}
+
+// Admin console: the full key -> address table, pending claims included and
+// winning over the file, ordered by address so the listing is stable.
+std::vector<std::pair<std::string, std::string>> db_list_ips(size_t limit) {
+    std::vector<std::pair<std::string, std::string>> rows;
+    if (limit == 0) {
+        return rows;
+    }
+
+    std::lock_guard<std::mutex> lock(db_mutex);
+    std::map<std::string, std::string> merged;  // client key -> ip
+
+    if (client_db != NULL) {
+        sqlite3_stmt* stmt = NULL;
+        if (sqlite3_prepare_v2(client_db, "SELECT identity, ip FROM client_ips", -1, &stmt,
+                               NULL) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char* key = sqlite3_column_text(stmt, 0);
+                const unsigned char* ip = sqlite3_column_text(stmt, 1);
+                if (key != NULL && ip != NULL) {
+                    merged[reinterpret_cast<const char*>(key)] =
+                        reinterpret_cast<const char*>(ip);
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+    for (const auto& entry : g_pending_claims) {
+        merged[entry.first] = entry.second;
+    }
+
+    std::vector<std::pair<std::string, std::string>> all(merged.begin(), merged.end());
+    std::sort(all.begin(), all.end(), [](const auto& left, const auto& right) {
+        const uint32_t left_ip = string_to_ip(left.second);
+        const uint32_t right_ip = string_to_ip(right.second);
+        if (left_ip != right_ip) return left_ip < right_ip;
+        return left.first < right.first;
+    });
+    for (const auto& entry : all) {
+        if (rows.size() >= limit) break;
+        rows.push_back(entry);
+    }
+    return rows;
+}
+
+std::string db_delete_ip(const std::string& client_key) {
+    if (client_db == NULL || client_key.empty()) {
+        return "";
+    }
+
+    std::string removed;
+    {
+        std::lock_guard<std::mutex> lock(db_mutex);
+
+        auto pending = g_pending_claims.find(client_key);
+        if (pending != g_pending_claims.end()) {
+            removed = pending->second;
+            auto reverse = g_pending_owner_by_ip.find(removed);
+            if (reverse != g_pending_owner_by_ip.end() && reverse->second == client_key) {
+                g_pending_owner_by_ip.erase(reverse);
+            }
+            g_pending_claims.erase(pending);
+        } else {
+            sqlite3_stmt* stmt = NULL;
+            if (sqlite3_prepare_v2(client_db, "SELECT ip FROM client_ips WHERE identity = ?1",
+                                   -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, client_key.c_str(), -1, SQLITE_TRANSIENT);
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const unsigned char* text = sqlite3_column_text(stmt, 0);
+                    if (text != NULL) removed = reinterpret_cast<const char*>(text);
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+    }
+    if (removed.empty()) {
+        return "";
+    }
+
+    // Same queue key as the address claim, so this delete lands after any claim
+    // that was already queued for the client and nothing re-creates the row.
+    g_write_queue.enqueue(client_key, [client_key] {
+        sqlite3_stmt* del = NULL;
+        if (sqlite3_prepare_v2(client_db, "DELETE FROM client_ips WHERE identity = ?1", -1,
+                               &del, NULL) != SQLITE_OK) {
+            return !store_retryable();
+        }
+        sqlite3_bind_text(del, 1, client_key.c_str(), -1, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(del);
+        sqlite3_finalize(del);
+        return rc == SQLITE_DONE || !store_retryable();
+    });
+    return removed;
 }

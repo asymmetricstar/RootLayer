@@ -1,38 +1,25 @@
-
 // client/tap/tap.h
 //
-// TAP driver install, adapter discovery and IP/firewall configuration.
+// Tunnel device (Wintun, layer 3) creation and IP/firewall configuration.
+// The names keep their historical "tap" prefix so the tunnel code does not
+// depend on the driver behind the device.
 #ifndef ROOTLAYER_TAP_H
 #define ROOTLAYER_TAP_H
 
 #include "core/win_headers.h"
 
-// The header lives in resources/tap/. The include path depends on whether the
-// including file sits in client/ or client/tap/ and on the -I. project root.
-#if defined(__has_include)
-#  if __has_include("../../resources/tap/tap-windows.h")
-#    include "../../resources/tap/tap-windows.h"
-#  elif __has_include("../resources/tap/tap-windows.h")
-#    include "../resources/tap/tap-windows.h"
-#  else
-#    include "resources/tap/tap-windows.h"
-#  endif
-#else
-#  include "../../resources/tap/tap-windows.h"
-#endif
-
-// Driver package install + adapter creation (admin).
+// Adapter creation (Wintun installs its own signed driver).
 bool install_tap_driver();
 bool find_available_tap_adapter(std::string& instance_guid, std::string& connection_name);
 void reset_tap_detection();
 bool adapter_connection_exists(const std::string& adapter_name);
 bool ensure_tap_adapter();
 
-// Adapter lookup (user mode device path / connection name).
+// Adapter identity: the Windows interface alias, which is also the netsh name.
 std::string get_tap_device_name();
 std::string get_tap_adapter_name();
 
-// IP, DNS, firewall rule and MTU setup; open + media status of the handle.
+// IP, DNS, firewall rule and MTU setup; packet session + link state.
 bool configure_tap_adapter(const std::string& ip, const std::string& gateway,
                            const std::string& mask, const std::string& gateway2);
 void prepare_tap_adapter(const std::string& adapter);

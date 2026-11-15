@@ -24,7 +24,7 @@ std::mutex panel_mutex;
 std::string panel_ip;
 std::string panel_ping_target;
 std::atomic<long long> panel_connected_since(0);  // unix seconds, 0 = offline
-std::atomic<int> panel_ping_ms(-1);               // -1 = no answer yet
+std::atomic<int> panel_ping_us(-1);               // microseconds, -1 = no answer yet
 std::atomic<int> panel_zone_status(0);            // 0 = checking, 1 = ok, 2 = down
 
 static const int PANEL_W = 300;
@@ -70,10 +70,30 @@ void panel_set_connected(bool connected, const std::string& ip) {
         }
     }
     panel_connected_since.store(connected ? (long long)std::time(NULL) : 0);
-    panel_ping_ms.store(-1);
+    panel_ping_us.store(-1);
     if (panel_hwnd != NULL) {
         InvalidateRect(panel_hwnd, NULL, FALSE);
     }
+}
+
+// ICMP reports its round trip only in whole milliseconds, and a working tunnel
+// answers well below one millisecond, so that value is always 0. The wall clock
+// around the (blocking) wait carries the real figure: the echo call returns
+// exactly when the reply arrives.
+static bool g_qpc_freq_known = false;
+static double g_qpc_freq = 1.0;
+
+static long long now_us() {
+    if (!g_qpc_freq_known) {
+        LARGE_INTEGER frequency;
+        if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0) {
+            g_qpc_freq = (double)frequency.QuadPart;
+        }
+        g_qpc_freq_known = true;
+    }
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (long long)((double)counter.QuadPart * 1000000.0 / g_qpc_freq);
 }
 
 static int ping_once(const std::string& target, DWORD timeout_ms) {
@@ -91,9 +111,16 @@ static int ping_once(const std::string& target, DWORD timeout_ms) {
     char payload[] = "p2p";
     char reply[sizeof(ICMP_ECHO_REPLY) + 8] = {0};
     int result = -1;
+    const long long started = now_us();
     if (IcmpSendEcho(icmp, address, payload, sizeof(payload) - 1, NULL, reply, sizeof(reply), timeout_ms) != 0) {
-        ICMP_ECHO_REPLY* echo = reinterpret_cast<ICMP_ECHO_REPLY*>(reply);
-        result = (int)echo->RoundTripTime;
+        const long long elapsed = now_us() - started;
+        // Below the whole-millisecond granularity of RoundTripTime: keep the
+        // measured microseconds (0 stays 0).
+        result = (int)(elapsed < 0 ? 0 : elapsed);
+        if (result == 0) {
+            ICMP_ECHO_REPLY* echo = reinterpret_cast<ICMP_ECHO_REPLY*>(reply);
+            result = (int)echo->RoundTripTime * 1000;
+        }
     }
     IcmpCloseHandle(icmp);
     return result;
@@ -138,7 +165,7 @@ static int dns_rtt_once(const std::string& server_ip, int timeout_ms) {
     query[offset++] = 0x00;  // class IN
     query[offset++] = 0x01;
 
-    const DWORD started = GetTickCount();
+    const long long started = now_us();
     if (sendto(sock, (const char*)query, (int)offset, 0, (sockaddr*)&target, sizeof(target)) == SOCKET_ERROR) {
         closesocket(sock);
         return -1;
@@ -155,10 +182,8 @@ static int dns_rtt_once(const std::string& server_ip, int timeout_ms) {
     if (select(0, &read_set, NULL, NULL, &tv) > 0) {
         char reply[512];
         if (recv(sock, reply, sizeof(reply), 0) > 0) {
-            result = (int)(GetTickCount() - started);
-            if (result < 0) {
-                result = 0;
-            }
+            const long long elapsed = now_us() - started;
+            result = (int)(elapsed < 0 ? 0 : elapsed);
         }
     }
     closesocket(sock);
@@ -206,7 +231,7 @@ void panel_worker_thread() {
             }
         }
 
-        panel_ping_ms.store(ping);
+        panel_ping_us.store(ping);
         if (panel_hwnd != NULL) {
             InvalidateRect(panel_hwnd, NULL, FALSE);
         }
@@ -227,6 +252,21 @@ static std::wstring panel_format_uptime() {
     wchar_t buffer[32];
     swprintf(buffer, 32, L"%02lld:%02lld:%02lld",
              seconds / 3600, (seconds / 60) % 60, seconds % 60);
+    return buffer;
+}
+
+// Microseconds in, a readable figure out: sub-millisecond replies keep two
+// decimals (0.42 ms) instead of collapsing to 0 ms.
+static std::wstring format_ping(int us) {
+    wchar_t buffer[32];
+    const double ms = us / 1000.0;
+    if (ms < 10.0) {
+        swprintf(buffer, 32, L"%.2f ms", ms);
+    } else if (ms < 100.0) {
+        swprintf(buffer, 32, L"%.1f ms", ms);
+    } else {
+        swprintf(buffer, 32, L"%lld ms", (long long)(ms + 0.5));
+    }
     return buffer;
 }
 
@@ -284,8 +324,8 @@ static void panel_paint(HWND hwnd) {
     }
     values[1] = panel_format_uptime();
 
-    int ping = panel_ping_ms.load();
-    values[2] = (ping < 0) ? L"\x2014" : std::to_wstring(ping) + L" ms";
+    int ping = panel_ping_us.load();
+    values[2] = (ping < 0) ? L"\x2014" : format_ping(ping);
 
     std::wstring tunnel_text;
     COLORREF tunnel_color = PANEL_VALUE_OFF;

@@ -120,9 +120,9 @@ static void apply_tld_list(const std::string& tlds) {
     set_tunnel_dns_namespaces(suffixes);
 }
 
-// Applies a "STATE GATEWAY:.. MASK:.. TLD:.." line the server pushes on the
-// control channel. The server is authoritative: a missing GATEWAY means it has
-// no tunnel gateway right now, which drops the client's resolver rules.
+// Applies a "STATE GATEWAY:.. MASK:.. TLD:.. MEMBERS:.." line the server pushes
+// on the control channel. The server is authoritative: a missing GATEWAY means
+// it has no tunnel gateway right now, which drops the client's resolver rules.
 static void apply_control_state(const std::string& line) {
     gateway_ip = token_value(line, "GATEWAY");
     const std::string mask = token_value(line, "MASK");
@@ -130,6 +130,13 @@ static void apply_control_state(const std::string& line) {
         tap_mask = mask;
     }
     apply_tld_list(token_value(line, "TLD"));
+
+    // Peer count, refreshed on every keepalive answer: a member that joins or
+    // leaves after this client connected still reaches its panel.
+    const int members = token_int(line, "MEMBERS", -1);
+    if (members >= 0) {
+        peer_count.store(members);
+    }
 }
 
 bool request_peer() {
@@ -173,13 +180,16 @@ bool request_peer() {
     // configuration file. On the first connect it is still empty, which is
     // fine: the token is only a hint for the server's endpoint learning.
     std::string request = "CLIENT_REQ:" + virtual_ip + " UDP_PORT:" + std::to_string(udp_tunnel_port);
-    if (static_enabled && !client_identity.empty()) {
-        request += " IDENTITY:" + client_identity;
-    }
+
     // Random id for this process: lets the server tell "the same client
     // reconnecting" (takeover) apart from "a second client.exe with the same
     // identity" (refused).
     request += " INSTANCE:" + process_instance_id();
+    // Permanent hardware id of this client (02:xx:...), so the server log and
+    // the operator see a stable name for the machine behind the session.
+    if (!client_hw_id.empty()) {
+        request += " HWID:" + client_hw_id;
+    }
     request += "\n";
     if (send(sock, request.c_str(), (int)request.size(), 0) == SOCKET_ERROR) {
         closesocket(sock);
@@ -222,6 +232,20 @@ bool request_peer() {
         return false;
     }
 
+    // The server is at its connection limit (its DoS shield refused this
+    // attempt). Nothing is wrong with this client: back off and retry like any
+    // other failed attempt instead of treating it as a fatal error.
+    if (response == "BUSY") {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::cerr << "Server is at its connection limit (BUSY); retrying." << std::endl;
+        }
+        closesocket(sock);
+        json_event("error", "\"code\":\"server_busy\"");
+        return false;
+    }
+
     std::string assigned_ip = token_value(response, "YOUR_IP");
     int relay = token_int(response, "RELAY_PORT", 0);
     gateway_ip = token_value(response, "GATEWAY");
@@ -240,8 +264,36 @@ bool request_peer() {
         auto_secure_on_server_ca(server_ca);
     }
     {
-        int members = token_int(response, "MEMBERS", 0);
-        if (members > 0) {
+        // Message of the day (server.ini motd=), percent-decoded for the panel.
+        const std::string motd = token_value(response, "MOTD");
+        if (!motd.empty()) {
+            std::string text;
+            for (size_t i = 0; i < motd.size(); ++i) {
+                if (motd.compare(i, 3, "%20") == 0) {
+                    text += ' ';
+                    i += 2;
+                } else if (motd.compare(i, 3, "%25") == 0) {
+                    text += '%';
+                    i += 2;
+                } else {
+                    text += motd[i];
+                }
+            }
+            server_motd = text;
+        }
+    }
+    {
+        // Bandwidth cap the server applies to this client: BAND:<up>:<down> in
+        // kbit/s, 0 = unlimited. Shown in the panel.
+        const std::string band = token_value(response, "BAND");
+        const size_t colon = band.find(':');
+        if (colon != std::string::npos) {
+            band_up_kbps.store(std::atoi(band.substr(0, colon).c_str()));
+            band_down_kbps.store(std::atoi(band.substr(colon + 1).c_str()));
+        }
+
+        const int members = token_int(response, "MEMBERS", -1);
+        if (members >= 0) {
             peer_count.store(members);
         }
     }

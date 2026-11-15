@@ -13,6 +13,8 @@
 #include "ui/panel.h"
 #include "ui/ui_qt.h"
 #include "ui/shared_state.h"
+#include "service/winservice.h"
+#include "netdev/wintun.h"
 
 // Libraries linked via command line: -lws2_32 -liphlpapi -lsetupapi
 // -lnetapi32 -lshell32 -ladvapi32 -lgdiplus -lgdi32 -lole32
@@ -46,14 +48,16 @@ static bool acquire_single_instance() {
     return GetLastError() != ERROR_ALREADY_EXISTS;
 }
 
-int main() {
-    headless_mode = has_headless_argument();
+static int run_client() {
+    // A service has no desktop: force headless so no tray icon and no Qt panel
+    // are created in the SCM's session-0 process.
+    headless_mode = has_headless_argument() || winservice::running_as_service();
     if (headless_mode) {
         attach_parent_console();
     }
 
     load_config_from_ini("client.ini");
-    ensure_client_identity(get_exe_dir() + "\\client.ini");
+    ensure_client_hw_id(get_exe_dir() + "\\client.ini");
 
     if (!resolve_name.empty()) {
         if (headless_mode) {
@@ -79,6 +83,7 @@ int main() {
 
     json_event("start", json_string_field("signaling", signaling_server_ip + ":" + std::to_string(signaling_server_port)) + "," +
                         json_number_field("udp_port", udp_tunnel_port) + "," +
+                        json_string_field("hw_id", client_hw_id) + "," +
                         json_string_field("mode", headless_mode ? "headless" : "gui"));
 
     WSADATA wsaData;
@@ -116,8 +121,6 @@ static int run_tunnel() {
             tray_thread.detach();
         }
         std::thread(panel_worker_thread).detach();
-        // Zone Network pill: probes the root server's domain zone system.
-        std::thread(zone_worker_thread).detach();
     }
 
     // virtual_ip stays empty until the signaling server assigns one: no
@@ -156,7 +159,7 @@ static int run_tunnel() {
     set_tap_media_status(true);
 
     if (!bind_udp_socket()) {
-        CloseHandle(tap_device);
+        netdev::close();
         WSACleanup();
         return 1;
     }
@@ -286,7 +289,7 @@ static int run_tunnel() {
         json_event("connected",
                    json_string_field("server", signaling_server_ip + ":" + std::to_string(signaling_server_port)) + "," +
                    json_string_field("local_ip", virtual_ip) + "," +
-                   json_number_field("static", static_enabled));
+                   json_string_field("hw_id", client_hw_id));
 
         if (!ip_applied) {
             tray_set_state_utf8(true, "Connected | IP not applied (" + virtual_ip + ")");
@@ -335,11 +338,9 @@ static int run_tunnel() {
     clear_tunnel_dns_rules();
     set_tap_media_status(false);
 
-    HANDLE tap_handle = tap_device;
-    tap_device = INVALID_HANDLE_VALUE;
-    if (tap_handle != INVALID_HANDLE_VALUE) {
-        CloseHandle(tap_handle);
-    }
+    // Ends the session and removes the adapter; the pump threads above see the
+    // session disappear and leave their loops.
+    netdev::close();
 
     SOCKET udp_socket = udp_sock;
     udp_sock = INVALID_SOCKET;
@@ -364,10 +365,40 @@ static int run_tunnel() {
 // The executable is linked as a GUI program (-mwindows), so double clicking
 // it never opens a console window. WinMain is only the entry point; the real
 // work happens in main().
+// --- Windows service ---------------------------------------------------------
+// "client.exe --service start|stop|status" installs/removes the automatic-start
+// service; the SCM starts the program with "--service run" and the tunnel body
+// above then runs headless as LocalSystem.
+static void service_on_stop() {
+    // The tunnel loop is blocked in a socket or condition wait; flag the
+    // shutdown and let the service handler end the process.
+    g_shutdown = true;
+}
+
+static winservice::Config service_config() {
+    winservice::Config config;
+    config.name = "RootLayerClient";
+    config.display_name = "RootLayer Client";
+    config.description =
+        "RootLayer virtual LAN client: TAP adapter, tunnel, DNS and certificate trust.";
+    config.run_app = run_client;
+    config.on_stop = service_on_stop;
+    return config;
+}
+
+int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+    if (winservice::requested()) {
+        return winservice::handle(service_config());
+    }
+    return run_client();
+}
+
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous_instance, LPSTR command_line, int show_cmd) {
     (void)instance;
     (void)previous_instance;
     (void)command_line;
     (void)show_cmd;
-    return main();
+    return main(0, NULL);
 }

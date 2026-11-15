@@ -13,7 +13,7 @@ extern std::string virtual_ip;
 extern std::string gateway_ip;
 extern std::atomic<bool> g_shutdown;
 extern std::atomic<long long> panel_connected_since;  // unix seconds, 0 = offline
-extern std::atomic<int> panel_ping_ms;                // -1 = no answer yet
+extern std::atomic<int> panel_ping_us;                // microseconds, -1 = no answer yet
 // Root server domain zone system probed over the signaling port:
 // 0 = checking, 1 = zone answering (green), 2 = zone down (red).
 extern std::atomic<int> panel_zone_status;

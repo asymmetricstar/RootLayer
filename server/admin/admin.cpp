@@ -14,6 +14,17 @@
 //                                             (the SUBJ_* values are only
 //                                             written into the certificate)
 //   CERT_LIST / CERT_DEL CN:x
+//   LIMIT_SET IP:10.0.0.5 UP:1024 DOWN:4096    per-client band cap in kbit/s
+//   LIMIT_LIST / LIMIT_CLEAR IP:10.0.0.5       (0 lifts that direction)
+//   IP_LIST [LIMIT:n]                          hardware id -> virtual address
+//   IP_SET HW:aa-bb-cc-dd-ee-ff IP:10.0.0.5    pin an address to a client
+//   IP_CLEAR HW:aa-bb-cc-dd-ee-ff              release it to the pool
+//   CONFIG_LIST                                server.ini settings in effect
+//   CONFIG_SET KEY:x VALUE:y                   change one; [TEXT64:base64]
+//                                              carries a value with spaces
+//
+// Only the console (server machine) can pin an address: a client cannot ask
+// for one, it always accepts what the server hands out.
 //
 // Field values never contain spaces: the console replaces them with '_' and
 // this layer sanitizes again, so a record cannot break the token format.
@@ -24,8 +35,15 @@
 #include "core/utils.h"
 #include "arpa/arpa.h"
 #include "ca/ca.h"
+#include "core/guard.h"
+#include "core/limits.h"
+#include "db/store.h"
+#include "session/session.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -66,6 +84,180 @@ bool valid_ipv4(const std::string& text) {
     if (parts != 4) return false;
     const unsigned long address = inet_addr(text.c_str());
     return address != INADDR_NONE && address != INADDR_ANY;
+}
+
+// Canonical aa:bb:cc:dd:ee:ff hardware id. ':' and '-' are both accepted, so a
+// value copied from `ip list` (which prints '-' to stay one token) can be
+// pasted straight back into `ip set`.
+std::string normalize_hw(const std::string& text) {
+    if (text.size() != 17) return "";
+    std::string out;
+    out.reserve(17);
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (i % 3 == 2) {
+            if (c != ':' && c != '-') return "";
+            out.push_back(':');
+        } else {
+            if (!isxdigit((unsigned char)c)) return "";
+            out.push_back((char)tolower((unsigned char)c));
+        }
+    }
+    return out;
+}
+
+// Hardware id as it travels in an answer: '-' instead of ':' keeps it a single
+// token in the space separated protocol.
+std::string hw_token(const std::string& hw) {
+    std::string out = hw;
+    for (char& c : out) {
+        if (c == ':') c = '-';
+    }
+    return out;
+}
+
+// ---- server.ini settings the console may change --------------------------
+// `live` means the running server picks the new value up immediately; the
+// others are written to server.ini and take effect on the next start (ports,
+// bind address and the subnet geometry cannot move under live sessions).
+struct ConfigKey {
+    const char* name;
+    bool live;
+};
+
+const ConfigKey kConfigKeys[] = {
+    {"motd", true},
+    {"client_upload_kbps", true},
+    {"client_download_kbps", true},
+    {"guard_max_connections", true},
+    {"guard_max_pps", true},
+    {"guard_min_pps", true},
+    {"guard_max_budget_pps", true},
+    {"guard_per_ip_pps", true},
+    {"guard_connect_limit", true},
+    {"guard_connect_window_sec", true},
+    {"guard_source_table", true},
+    {"guard_source_idle_sec", true},
+    {"guard_log_interval_sec", true},
+    {"listening_port", false},
+    {"relay_port", false},
+    {"local_ip", false},
+    {"gateway_ip", false},
+    {"virtual_ip_prefix", false},
+    {"virtual_ip_mask", false},
+    {"pool_start", false},
+    {"pool_end", false},
+    {"tap_gateway", false},
+    {"nat", false},
+};
+
+const ConfigKey* find_config_key(const std::string& name) {
+    for (const auto& key : kConfigKeys) {
+        if (name == key.name) return &key;
+    }
+    return nullptr;
+}
+
+// A value that may contain spaces (message of the day, a file path) keeps them
+// readable: spaces travel as %20, '%' as %25, and only the protocol
+// separators are replaced. The console turns them back into text.
+std::string encode_field(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char c : text) {
+        if (c == '%') {
+            out += "%25";
+        } else if (c == ' ') {
+            out += "%20";
+        } else if (c == '|' || c == ';' || c == '\t' || c == '\r' || c == '\n') {
+            out.push_back('_');
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// The value currently in server.ini (empty = unset).
+std::string config_ini_value(const std::string& key) {
+    char buffer[512] = {0};
+    GetPrivateProfileStringA("Settings", key.c_str(), "", buffer, sizeof(buffer),
+                             server_ini_path().c_str());
+    return trim(std::string(buffer));
+}
+
+bool all_digits(const std::string& text) {
+    if (text.empty()) return false;
+    for (char c : text) {
+        if (c < '0' || c > '9') return false;
+    }
+    return true;
+}
+
+// Every stored value is a plain integer, so validation is per key family.
+bool validate_config_value(const std::string& key, const std::string& value,
+                           std::string* error) {
+    if (key == "motd") {
+        return true;  // free text, may be empty
+    }
+    if (key == "local_ip") {
+        if (value.empty() || valid_ipv4(value)) return true;
+        *error = "bad_ip";
+        return false;
+    }
+    if (key == "gateway_ip" || key == "pool_start" || key == "pool_end" ||
+        key == "virtual_ip_mask") {
+        if (valid_ipv4(value)) return true;
+        *error = "bad_ip";
+        return false;
+    }
+    if (key == "listening_port" || key == "relay_port") {
+        const int port = all_digits(value) ? std::atoi(value.c_str()) : -1;
+        if (port >= 1 && port <= 65535) return true;
+        *error = "bad_port";
+        return false;
+    }
+    if (key == "tap_gateway" || key == "nat") {
+        if (value == "0" || value == "1") return true;
+        *error = "bad_switch";
+        return false;
+    }
+    if (key == "virtual_ip_prefix") {
+        const int prefix = all_digits(value) ? std::atoi(value.c_str()) : -1;
+        if (prefix >= 8 && prefix <= 30) return true;
+        *error = "bad_prefix";
+        return false;
+    }
+    if (key.rfind("client_", 0) == 0) {
+        if (all_digits(value)) return true;  // kbit/s, 0 = unlimited
+        *error = "bad_number";
+        return false;
+    }
+    if (key.rfind("guard_", 0) == 0) {
+        const int number = all_digits(value) ? std::atoi(value.c_str()) : -1;
+        if (number >= 1) return true;
+        *error = "bad_number";
+        return false;
+    }
+    *error = "unknown_key";
+    return false;
+}
+
+// Applies one guard_* value to the running shield (clamped there).
+void apply_guard_setting(const std::string& key, int value) {
+    guard::Settings shield = guard::settings();
+    if (key == "guard_max_connections") shield.max_connections = value;
+    else if (key == "guard_max_pps") shield.max_pps = value;
+    else if (key == "guard_min_pps") shield.min_pps = value;
+    else if (key == "guard_max_budget_pps") shield.max_budget_pps = value;
+    else if (key == "guard_per_ip_pps") shield.per_ip_pps = value;
+    else if (key == "guard_connect_limit") shield.connect_limit = value;
+    else if (key == "guard_connect_window_sec") shield.connect_window_sec = value;
+    else if (key == "guard_source_table") shield.source_table = value;
+    else if (key == "guard_source_idle_sec") shield.source_idle_sec = value;
+    else if (key == "guard_log_interval_sec") shield.log_interval_sec = value;
+    else return;
+    guard::configure(shield);
 }
 
 std::string tld_csv() {
@@ -281,6 +473,134 @@ bool admin_request(const std::string& request, std::string& response) {
         return true;
     }
 
+    // Per-client bandwidth caps. IP is the virtual address the client was
+    // given (it is what the logs show); UP/DOWN are kbit/s, 0 lifts the cap.
+    // The override applies to a live session immediately and is remembered for
+    // the next connection of that address or hardware id (runtime only).
+    if (command == "LIMIT_SET") {
+        // The key is the virtual IP: it has no ':' and it is what the logs
+        // and the client both show.
+        const std::string key = token_value(rest, "IP");
+        const int up = token_int(rest, "UP", -1);
+        const int down = token_int(rest, "DOWN", -1);
+        if (key.empty()) {
+            response = fail("missing_argument");
+            return false;
+        }
+        if (!key.empty() && key.find('.') != std::string::npos && !valid_ipv4(key)) {
+            response = fail("bad_ip");
+            return false;
+        }
+        if (up < 0 || down < 0) {
+            response = fail("bad_rate");
+            return false;
+        }
+        const double up_bps = (double)up * 1000.0 / 8.0;
+        const double down_bps = (double)down * 1000.0 / 8.0;
+        const bool live = limits::set_for(key, up_bps, down_bps);
+        response = ok("KEY:" + key + " UP:" + std::to_string(up) +
+                      " DOWN:" + std::to_string(down) +
+                      " LIVE:" + (live ? "1" : "0"));
+        return true;
+    }
+
+    if (command == "LIMIT_LIST") {
+        const std::string csv = limits::list_csv();
+        const size_t count = csv.empty() ? 0 : (size_t)std::count(csv.begin(), csv.end(), ';') + 1;
+        response = ok("COUNT:" + std::to_string(count) + " LIMITS:" + csv);
+        return true;
+    }
+
+    if (command == "LIMIT_CLEAR") {
+        const std::string key = token_value(rest, "IP");
+        if (key.empty()) {
+            response = fail("missing_argument");
+            return false;
+        }
+        limits::clear(key);
+        response = ok("KEY:" + key);
+        return true;
+    }
+
+    // Fixed address management. Only this admin path can pin an address to a
+    // client key; clients never request one, they take what they are given.
+    if (command == "IP_LIST") {
+        int limit = token_int(rest, "LIMIT", 200);
+        if (limit <= 0 || limit > 5000) {
+            limit = 200;
+        }
+        const std::vector<std::pair<std::string, std::string>> rows =
+            db_list_ips((size_t)limit);
+        // hw|address|online/offline|seconds since last seen (-1 = not seen
+        // since this server start). The console turns the age into words, so
+        // the server never has to know the console's clock.
+        const long long now = (long long)std::time(NULL);
+        std::string list;
+        for (const auto& row : rows) {
+            const bool live = ip_active(row.second);
+            const long long seen = live ? now : client_last_seen(row.first);
+            const long long age = (seen > 0 && now >= seen) ? now - seen : -1;
+            if (!list.empty()) list += ";";
+            list += hw_token(row.first) + "|" + sanitize_token(row.second) + "|" +
+                    (live ? "online" : "offline") + "|" + std::to_string(age);
+        }
+        response = ok("COUNT:" + std::to_string(rows.size()) + " IPS:" + list);
+        return true;
+    }
+
+    if (command == "IP_SET") {
+        const std::string hw = normalize_hw(token_value(rest, "HW"));
+        const std::string ip = token_value(rest, "IP");
+        if (hw.empty()) {
+            response = fail("bad_hw_id");
+            return false;
+        }
+        if (!valid_ipv4(ip)) {
+            response = fail("bad_ip");
+            return false;
+        }
+        const uint32_t address = string_to_ip(ip);
+        if (address < virtual_ip_first_client || address > virtual_ip_last ||
+            address == virtual_ip_server) {
+            response = fail("ip_outside_pool");
+            return false;
+        }
+        // A live session of ANOTHER client already using it is a hard stop; a
+        // live session of this same client is fine (it reconnects below).
+        const std::string holder = session_key_for_ip(ip);
+        if (!holder.empty() && holder != hw) {
+            response = fail("ip_in_use");
+            return false;
+        }
+        if (!db_save_ip(hw, ip)) {
+            response = fail("ip_taken");
+            return false;
+        }
+        // The client is online with another address: drop the session so it
+        // comes back and takes the pinned one.
+        const bool moved = retire_sessions_for_key(hw);
+        response = ok("HW:" + hw_token(hw) + " IP:" + ip +
+                      " LIVE:" + (moved ? "1" : "0"));
+        return true;
+    }
+
+    if (command == "IP_CLEAR") {
+        const std::string hw = normalize_hw(token_value(rest, "HW"));
+        if (hw.empty()) {
+            response = fail("bad_hw_id");
+            return false;
+        }
+        const std::string freed = db_delete_ip(hw);
+        if (freed.empty()) {
+            response = fail("not_found");
+            return false;
+        }
+        const bool moved = retire_sessions_for_key(hw);
+        response = ok("HW:" + hw_token(hw) + " FREED:" + freed +
+                      " LIVE:" + (moved ? "1" : "0"));
+        return true;
+    }
+
     if (command == "CERT_DEL") {
         const std::string cn = token_value(rest, "CN");
         if (cn.empty()) {
@@ -292,6 +612,71 @@ bool admin_request(const std::string& request, std::string& response) {
             return false;
         }
         response = ok("CN:" + cn);
+        return true;
+    }
+
+    // server.ini at runtime. The file on disk is rewritten too, so the change
+    // is still there after a restart.
+    if (command == "CONFIG_LIST") {
+        std::string list;
+        for (const auto& key : kConfigKeys) {
+            if (!list.empty()) list += ";";
+            list += std::string(key.name) + "|" + encode_field(config_ini_value(key.name)) +
+                    "|" + (key.live ? "live" : "restart");
+        }
+        response = ok("PATH:" + encode_field(server_ini_path()) + " COUNT:" +
+                      std::to_string(sizeof(kConfigKeys) / sizeof(kConfigKeys[0])) +
+                      " CONFIG:" + list);
+        return true;
+    }
+
+    if (command == "CONFIG_SET") {
+        const std::string key = token_value(rest, "KEY");
+        std::string value = token_value(rest, "VALUE");
+        const std::string encoded = token_value(rest, "TEXT64");
+        if (!encoded.empty()) {
+            value = ca::base64_decode(encoded);
+        }
+        if (key.empty()) {
+            response = fail("missing_argument");
+            return false;
+        }
+        const ConfigKey* entry = find_config_key(key);
+        if (entry == nullptr) {
+            response = fail("unknown_key");
+            return false;
+        }
+        if (server_ini_path().empty()) {
+            response = fail("config_unavailable");
+            return false;
+        }
+        std::string error;
+        if (!validate_config_value(key, value, &error)) {
+            response = fail(error.empty() ? "bad_value" : error);
+            return false;
+        }
+        if (WritePrivateProfileStringA("Settings", key.c_str(), value.c_str(),
+                                       server_ini_path().c_str()) == 0) {
+            response = fail("config_write_failed");
+            return false;
+        }
+
+        // Live settings are applied to the running server right away.
+        if (key == "motd") {
+            set_server_motd(trim(value));
+        } else if (key == "client_upload_kbps" || key == "client_download_kbps") {
+            const double up = (double)std::atoi(config_ini_value("client_upload_kbps").c_str()) *
+                              1000.0 / 8.0;
+            const double down =
+                (double)std::atoi(config_ini_value("client_download_kbps").c_str()) *
+                1000.0 / 8.0;
+            limits::set_defaults(up, down);
+        } else if (key.rfind("guard_", 0) == 0) {
+            apply_guard_setting(key, std::atoi(value.c_str()));
+        }
+
+        response = ok("KEY:" + key + " VALUE:" + encode_field(value) +
+                      " APPLY:" + (entry->live ? "live" : "restart"));
         return true;
     }
 

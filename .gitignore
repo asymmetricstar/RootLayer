@@ -1,0 +1,11 @@
+# Build output (compiled binaries, objects, logs, tool reports)
+build/
+
+# Local test payloads and captures
+test/data/*.bin
+*.log
+
+# Compiler leftovers
+*.o
+*.obj
+*.res

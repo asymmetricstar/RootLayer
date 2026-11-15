@@ -232,10 +232,10 @@ bool ensure_client_ini_exists(const std::string& ini_file) {
             out << "# Signaling server settings\n";
             out << "signaling_server_ip=127.0.0.1\n";
             out << "signaling_server_port=40000\n\n";
-            out << "# static=1: same address on every start, 0: random address\n";
-            out << "static=0\n";
-            out << "# identity used when static=1 (generated when empty)\n";
-            out << "identity=\n\n";
+            out << "# permanent hardware id of this client in MAC notation. It is\n";
+            out << "# also the key the server stores the address under, so keeping it\n";
+            out << "# keeps the same virtual IP (generated on first start).\n";
+            out << "hw_id=\n\n";
             out << "# Certificate subject fields (client certificate). The common\n";
             out << "# name (CN) is the virtual IP the server assigns. Empty fields\n";
             out << "# are left out of the certificate.\n";
@@ -250,6 +250,28 @@ bool ensure_client_ini_exists(const std::string& ini_file) {
         }
     }
     return true;
+}
+
+// Accepts 12 hex digits with optional ':'/'-' separators and returns the
+// canonical aa:bb:cc:dd:ee:ff form, or "" when the value is not a hardware id.
+static std::string normalize_hw_id(const std::string& text) {
+    std::string digits;
+    for (char c : text) {
+        if (isxdigit((unsigned char)c)) {
+            digits.push_back((char)tolower((unsigned char)c));
+        } else if (c != ':' && c != '-' && c != ' ' && c != '\t') {
+            return "";
+        }
+    }
+    if (digits.size() != 12) {
+        return "";
+    }
+    std::string out;
+    for (size_t i = 0; i < digits.size(); i += 2) {
+        if (!out.empty()) out += ':';
+        out += digits.substr(i, 2);
+    }
+    return out;
 }
 
 // Helper to load configuration from INI file
@@ -316,13 +338,9 @@ bool load_config_from_ini(const std::string& ini_file) {
         return "";
     };
 
-    std::string static_str = read_ini_value("static");
-    static_enabled = (static_str == "1");
-
-    std::string id_value = read_ini_value("identity");
-    size_t ib = id_value.find_first_not_of(" \t\r\n");
-    size_t ie = id_value.find_last_not_of(" \t\r\n");
-    client_identity = (ib == std::string::npos) ? "" : id_value.substr(ib, ie - ib + 1);
+    // Permanent hardware id (also the address key on the server). A value that is not a hardware id is ignored and
+    // ensure_client_hw_id() writes a fresh one instead of keeping garbage.
+    client_hw_id = normalize_hw_id(read_ini_value("hw_id"));
 
     // Certificate subject profile (E/CN/O/L/S/C). CN comes from the assigned
     // virtual IP at enrollment; the rest is this machine's user profile.
@@ -352,22 +370,27 @@ std::string trim(const std::string& text) {
     return text.substr(begin, end - begin + 1);
 }
 
-// With static=1 the client keeps one identity and writes it to client.ini, so
-// the server can map it to the same virtual IP on every start.
-void ensure_client_identity(const std::string& ini_full_path) {
-    if (!static_enabled || !client_identity.empty()) {
+// Permanent 48-bit hardware id of this machine's client, written once into
+// client.ini. The locally administered bit is set (02:...), which is the same
+// convention virtual adapters use, so the value can never clash with a real NIC.
+void ensure_client_hw_id(const std::string& ini_full_path) {
+    if (!client_hw_id.empty()) {
         return;
     }
 
     std::random_device device;
-    unsigned long long high = ((unsigned long long)device() << 32) ^ (unsigned long long)device();
-    unsigned long long low = ((unsigned long long)GetTickCount64() << 32) ^ (unsigned long long)device();
+    unsigned long long mix = ((unsigned long long)device() << 32) ^
+                             (unsigned long long)device() ^
+                             ((unsigned long long)GetTickCount64() << 16);
 
-    char identity[33] = {0};
-    std::snprintf(identity, sizeof(identity), "%016llx%016llx", high, low);
-    client_identity = identity;
+    char text[18] = {0};
+    std::snprintf(text, sizeof(text), "02:%02x:%02x:%02x:%02x:%02x",
+                  (unsigned int)((mix >> 32) & 0xff), (unsigned int)((mix >> 24) & 0xff),
+                  (unsigned int)((mix >> 16) & 0xff), (unsigned int)((mix >> 8) & 0xff),
+                  (unsigned int)(mix & 0xff));
+    client_hw_id = text;
 
-    WritePrivateProfileStringA("Settings", "identity", client_identity.c_str(), ini_full_path.c_str());
+    WritePrivateProfileStringA("Settings", "hw_id", client_hw_id.c_str(), ini_full_path.c_str());
 }
 
 // Read a "KEY:value" token out of a space separated signaling response.

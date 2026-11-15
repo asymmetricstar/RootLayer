@@ -31,10 +31,21 @@ extern bool g_qt_ui;
 
 // Members reported by the server for the shared segment (shown in the panel).
 extern std::atomic<int> peer_count;
+// Bandwidth cap the server applies to this client, in kbit/s per direction
+// (0 = unlimited). Reported by the server as BAND:up:down.
+extern std::atomic<int> band_up_kbps;
+extern std::atomic<int> band_down_kbps;
 
-// static=1 in client.ini: stable identity so the server assigns the same IP.
-extern int static_enabled;
-extern std::string client_identity;
+// Message of the day sent by the server (server.ini motd=), shown in the
+// panel header. Empty = the server has no message.
+extern std::string server_motd;
+
+// The server keeps a client's address, so the hardware id alone identifies it.
+
+// Permanent 48-bit hardware id of this client in MAC notation
+// (02:xx:xx:xx:xx:xx). Wintun moves bare IP packets, so the tunnel itself has
+// no MAC addresses; this is the stable identifier the client presents instead.
+extern std::string client_hw_id;
 
 // Certificate subject profile (client certificate). The CN is the virtual IP
 // the server assigns; these are the human readable fields from client.ini.
@@ -49,7 +60,8 @@ extern bool headless_mode;
 extern std::string resolve_name;
 
 extern SOCKET udp_sock;
-extern HANDLE tap_device;
+// The tunnel device (Wintun) is owned by netdev/wintun.cpp: there is no device
+// handle to share any more.
 
 // Tunnel counters, reported as a "stats" event every few seconds.
 extern std::atomic<unsigned long long> frames_from_tap;

@@ -3,6 +3,7 @@
 // tunnel thread through the globals declared below, so the UI never blocks on
 // network or TAP work.
 #include "ui_qt.h"
+#include "core/state.h"
 
 #include <QAction>
 #include <QApplication>
@@ -305,10 +306,10 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
     }
 
-    // Each entry is one real measurement from IcmpSendEcho (-1 = no reply, drawn
+    // Each entry is one real round trip in microseconds (-1 = no reply, drawn
     // as a gap instead of inventing a value).
-    void push(int ms) {
-        history_.append(ms);
+    void push(int us) {
+        history_.append(us);
         while (history_.size() > 24) history_.removeFirst();
         update();
     }
@@ -323,11 +324,18 @@ protected:
         if (history_.isEmpty()) return;
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        double maxv = 10.0;
+        // Values are microseconds; a 1 ms floor keeps sub-millisecond jitter
+        // visible instead of flattening the trace against the baseline.
+        double maxv = 1000.0;
         for (int v : history_) maxv = std::max(maxv, double(v));
 
         const double w = width();
         const double h = height();
+        // Keep the trace inside the widget: a 0 ms reading (or a flat series)
+        // sits at the baseline instead of hugging the bottom edge, where it
+        // reads as a stray underline under the card.
+        const double top = 3.0;
+        const double bottom = h - 8.0;
         QPainterPath path;
         bool pen_down = false;
         for (int i = 0; i < history_.size(); ++i) {
@@ -336,7 +344,7 @@ protected:
                 continue;
             }
             const double x = history_.size() == 1 ? 0.0 : (double(i) / (history_.size() - 1)) * w;
-            const double y = h - 3.0 - (double(history_[i]) / maxv) * (h - 6.0);
+            const double y = bottom - (double(history_[i]) / maxv) * (bottom - top);
             if (!pen_down) {
                 path.moveTo(x, y);
                 pen_down = true;
@@ -569,12 +577,19 @@ private:
         auto* text = new QVBoxLayout;
         text->setSpacing(2);
         text->setContentsMargins(0, 0, 0, 0);
-        title_ = new QLabel;
+        // The product name sits on the first line; the server's MOTD takes the
+        // second line where the tagline used to be.
+        title_ = new QLabel("Virtual Network Interface");
         title_->setFont(ui_font(16, true));
-        title_->setTextFormat(Qt::RichText);
-        subtitle_ = new QLabel("Virtual Network Interface");
+        title_->setTextFormat(Qt::PlainText);
+        subtitle_ = new QLabel;
         subtitle_->setFont(ui_font(12));
         subtitle_->setStyleSheet("color:#8B94A7;");
+        subtitle_->setTextFormat(Qt::PlainText);
+        // A long MOTD must never widen the panel or spill out of it: the label
+        // gives up its natural width and the text is elided to what fits.
+        subtitle_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        subtitle_->setMinimumWidth(0);
         text->addWidget(title_);
         text->addWidget(subtitle_);
         row->addLayout(text, 1);
@@ -620,13 +635,16 @@ private:
         strip_row->addWidget(state_pill_);
         strip_row->addStretch();
 
-        tunnel_pill_ = new QLabel("Zone Network");
-        tunnel_pill_->setFont(ui_font(11, true));
-        tunnel_pill_->setAlignment(Qt::AlignCenter);
-        // Gray until the first zone probe answers (panel_zone_status = 0).
-        tunnel_pill_->setStyleSheet(
-            "background:rgba(139,148,167,0.18); color:#8B94A7; border-radius:10px; padding:3px 9px;");
-        strip_row->addWidget(tunnel_pill_);
+        // Two lines of plain text on the right of the strip (no badge): the
+        // bandwidth cap the server applies to this client and the frame
+        // counters. Grey on the strip colour, small font.
+        info_ = new QLabel;
+        info_->setFont(ui_font(11));
+        info_->setStyleSheet("color:#8B94A7; background:transparent;");
+        info_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        info_->setTextFormat(Qt::PlainText);
+        info_->setText("Limit  —\n↑ —   ↓ — packets");
+        strip_row->addWidget(info_);
         root->addWidget(strip);
 
         // 2x2 information cards.
@@ -669,17 +687,27 @@ private:
 
     void sample_ping() {
         if (!connected_ || spark_ == nullptr) return;
-        const int ms = panel_ping_ms.load();
-        spark_->push(ms >= 0 ? ms : -1);  // real RTT, or a gap when nothing replied
+        const int us = panel_ping_us.load();
+        spark_->push(us >= 0 ? us : -1);  // real RTT, or a gap when nothing replied
     }
 
     void refresh() {
         const long long since = panel_connected_since.load();
         connected_ = since > 0;
 
-        title_->setText(QString("RootLayer <span style=\"color:%1\">• %2</span>")
-                            .arg(connected_ ? "#22C55E" : "#8B94A7",
-                                 connected_ ? "Online" : "Offline"));
+        // Header: fixed product line, server MOTD below it. The MOTD is cut to
+        // the space the label really has, so it always ends in "..." instead of
+        // running past the panel edge.
+        const QString motd = QString::fromStdString(server_motd);
+        const int room = subtitle_->width() > 0 ? subtitle_->width()
+                                                : qMax(120, width() - 120);
+        const QString shown = subtitle_->fontMetrics().elidedText(motd, Qt::ElideRight,
+                                                                 qMax(40, room));
+        subtitle_->setText(shown);
+        // A cut-off MOTD keeps the full text in a hover tooltip; a line that fits
+        // needs none.
+        subtitle_->setToolTip(shown == motd ? QString() : motd);
+        subtitle_->setVisible(!motd.isEmpty());
 
         const QString ip = connected_ ? QString::fromStdString(virtual_ip) : QString("—");
         ip_.value->setText(ip.isEmpty() ? QString("—") : ip);
@@ -695,9 +723,13 @@ private:
             uptime_.sub->setStyleSheet("color:#667085;");
         }
 
-        const int ms = panel_ping_ms.load();
-        if (connected_ && ms >= 0) {
-            ping_.value->setText(QString("%1 ms").arg(ms));
+        const int us = panel_ping_us.load();
+        if (connected_ && us >= 0) {
+            // Sub-millisecond replies keep two decimals; the value is the real
+            // measurement, never rounded down to 0.
+            const double ms = us / 1000.0;
+            const int decimals = ms < 10.0 ? 2 : (ms < 100.0 ? 1 : 0);
+            ping_.value->setText(QString("%1 ms").arg(ms, 0, 'f', decimals));
             ping_.value->setStyleSheet("color:#EEF2F7;");
             ping_.sub->setText("last 48 s");
             ping_.sub->setStyleSheet("color:#667085;");
@@ -732,21 +764,27 @@ private:
         state_pill_->setStyleSheet(connected_
             ? "background:rgba(34,197,94,0.20); color:#22C55E; border-radius:10px; padding:3px 9px;"
             : "background:rgba(139,148,167,0.18); color:#8B94A7; border-radius:10px; padding:3px 9px;");
-        // Fixed badge text: the pill colour reports the root server's domain
-        // zone system - green when it answers, red when it does not, gray
-        // while the first probe is still running.
-        tunnel_pill_->setText("Zone Network");
-        const int zone = panel_zone_status.load();
-        if (zone == 1) {
-            tunnel_pill_->setStyleSheet(
-                "background:rgba(34,197,94,0.15); color:#6EE7B7; border-radius:10px; padding:3px 9px;");
-        } else if (zone == 2) {
-            tunnel_pill_->setStyleSheet(
-                "background:rgba(239,68,68,0.15); color:#FCA5A5; border-radius:10px; padding:3px 9px;");
-        } else {
-            tunnel_pill_->setStyleSheet(
-                "background:rgba(139,148,167,0.18); color:#8B94A7; border-radius:10px; padding:3px 9px;");
-        }
+        // Transport summary: bandwidth cap (per direction) and frame counts.
+        auto rate_text = [](int kbps) -> QString {
+            if (kbps <= 0) return QString("—");
+            if (kbps >= 1000) return QString("%1 Mbps").arg(kbps / 1000.0, 0, 'g', 3);
+            return QString("%1 kbps").arg(kbps);
+        };
+        const int up_kbps = band_up_kbps.load();
+        const int down_kbps = band_down_kbps.load();
+        const QString limit = (up_kbps <= 0 && down_kbps <= 0)
+                                  ? QString("Limit  none")
+                                  : QString("Limit  %1 / %2")
+                                        .arg(rate_text(up_kbps), rate_text(down_kbps));
+        // "packets", not an abbreviation: the tunnel carries IP packets and the
+        // counters are totals, so pps (per second) would be wrong here.
+        const QString traffic = connected_
+            ? QString("↑ %1   ↓ %2 packets")
+                  .arg(frames_from_tap.load())
+                  .arg(frames_to_tap.load())
+            : QString("↑ —   ↓ — packets");
+        info_->setText(connected_ ? limit + "\n" + traffic
+                                  : QString("Limit  —\n↑ —   ↓ — packets"));
 
         if (!connected_) {
             spark_->reset();
@@ -756,9 +794,9 @@ private:
     QLabel* title_ = nullptr;
     QLabel* subtitle_ = nullptr;
     QLabel* state_pill_ = nullptr;
-    QLabel* tunnel_pill_ = nullptr;
+    QLabel* info_ = nullptr;
     PulseDot* dot_ = nullptr;
-    // (the peer count is shown inside state_pill_, so there is no separate label)
+        // (the peer count is shown inside state_pill_, so there is no separate label)
     Sparkline* spark_ = nullptr;
     Card ip_;
     Card uptime_;

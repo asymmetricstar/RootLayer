@@ -92,7 +92,7 @@ Administrative details:
 
 - **Server (`server.exe`)**: root server/control point for signaling, virtual gateway, relay, name/TLD/DNS services, IP allocation, CA/certificate services, and runtime coordination/policy.
 - **Client (`client.exe`)**: joins the virtual network, provisions/manages the local virtual interface, maintains tunnel/signaling sessions, integrates private name resolution, and handles trust/bootstrap behavior.
-- **Console (`console.exe`)**: standalone server administration tool for a running server (documented in [`console/readme.md`](console/readme.md)).
+- **Console (`console.exe`)**: standalone server administration tool for a running server.
 - **Service integration (`service/`)**: shared Windows service wrapper used by server and client executables.
 - **Netdev / TAP-Wintun resources (`netdev/`, `resources/`)**: low-level virtual network device integration and bundled runtime/driver resources.
 

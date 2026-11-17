@@ -1,9 +1,6 @@
 # RootLayer Federation (Server-to-Server Peering)
 
-Status: **implemented (v1.0).** The decisions in this file
-describes the code and how to use it.
-
-Goal: clients of multiple RootLayer servers such as A, B, and C should work as a
+clients of multiple RootLayer servers such as A, B, and C should work as a
 single virtual network **without any changes to the clients**. A client still
 connects to its own server and receives its own virtual IP. The servers
 communicate with each other.

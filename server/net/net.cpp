@@ -11,6 +11,7 @@
 #include "core/guard.h"
 #include "core/log.h"
 #include "core/limits.h"
+#include "federation/federation.h"
 
 #include <cctype>
 
@@ -177,7 +178,17 @@ void relay_thread() {
                 }
             }
 
-            if (targets.empty()) {
+            // Federation data plane: a directed packet for another server's
+            // address block is wrapped and sent straight to that server. The
+            // primary is not a hub, so this happens server to server only.
+            // Broadcast/multicast never crosses the link (rule 9), and local
+            // destinations are decided above, never through the link.
+            bool federated = false;
+            if (targets.empty() && directed) {
+                federated = fed::forward_packet(buffer, len);
+            }
+
+            if (targets.empty() && !federated) {
                 for (const auto& session : online) {
                     if (!session->endpoint_known || session == source) {
                         continue;
@@ -192,8 +203,9 @@ void relay_thread() {
                 }
                 // Nothing on the segment matched (the gateway address itself,
                 // a broadcast, or an internet destination): let the host stack
-                // route it. A packet that was handed to a client above is not
-                // written to the gateway as well, which would loop it back.
+                // route it. A packet that was handed to a client or to a peer
+                // above is not written to the gateway as well, which would
+                // loop it back.
                 do_gateway_write = gateway_active.load();
             }
         }

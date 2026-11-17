@@ -11,7 +11,7 @@ SRCS = main.cpp \
        net/admin_client.cpp \
        commands/registry.cpp commands/name_commands.cpp commands/tld_commands.cpp \
        commands/cert_commands.cpp commands/server_commands.cpp commands/limit_commands.cpp \
-       commands/ip_commands.cpp commands/config_commands.cpp
+       commands/ip_commands.cpp commands/config_commands.cpp commands/link_commands.cpp
 HDRS = $(wildcard core/*.h net/*.h commands/*.h)
 
 BIN_DIR = ../build/bin/Server

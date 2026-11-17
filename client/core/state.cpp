@@ -32,6 +32,9 @@ std::atomic<int> band_down_kbps(0);
 // Message of the day from the server, shown in the panel header.
 std::string server_motd;
 
+// Federation peer blocks (ROUTES token). Empty until the server announces one.
+std::vector<std::string> tunnel_routes;
+
 // The server keeps a client's address, so the hardware id alone identifies it.
 std::string client_hw_id;
 

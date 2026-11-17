@@ -3,6 +3,7 @@
 #include "core/globals.h"
 #include "core/config.h"
 #include "arpa/arpa.h"
+#include "federation/federation.h"
 #include "dns/dns.h"
 
 #include <map>
@@ -425,7 +426,14 @@ std::string dns_lookup_name(const std::string& name, int& out_ttl,
 
     // The name service answers from its write buffer first, so a record is
     // resolvable the moment it is registered - before the disk commit.
-    return arpa_lookup(n, &out_ttl, out_info);
+    const std::string local = arpa_lookup(n, &out_ttl, out_info);
+    if (!local.empty()) return local;
+
+    // Federation: a replica asks its primary for names it has not synced yet.
+    std::string remote;
+    std::string owner;
+    if (fed::lookup_name(n, remote, &owner) && !remote.empty()) return remote;
+    return "";
 }
 int build_dns_response(const unsigned char* query, int qlen,
                        unsigned char* out, int out_size,

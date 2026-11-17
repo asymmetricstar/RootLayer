@@ -10,6 +10,7 @@
 #include "core/utils.h"
 #include "session/session.h"
 #include "gateway/gateway.h"
+#include "federation/federation.h"
 #include "netdev/wintun.h"
 
 namespace {
@@ -137,7 +138,14 @@ void gateway_to_relay_thread() {
         if (bytes_read == 0) {
             continue;  // idle timeout
         }
-        // A packet routing through the gateway belongs to the whole segment.
+        // A packet routing through the gateway belongs to the whole segment,
+        // unless its destination is another server's address block: then it
+        // takes the federation link instead of being flooded only here. This
+        // is what lets the server host itself reach a remote client (for
+        // example `ping 10.0.0.19` from the B machine).
+        if (fed::forward_packet(buffer, bytes_read)) {
+            continue;
+        }
         flood_to_sessions(buffer, bytes_read, nullptr);
     }
 }

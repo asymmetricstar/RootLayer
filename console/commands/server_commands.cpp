@@ -31,6 +31,10 @@ public:
             {"gateway", token_value(result.response, "GATEWAY")},
             {"certificates", token_value(result.response, "CERTS")},
             {"ca fingerprint", token_value(result.response, "CA")},
+            {"mode", token_value(result.response, "MODE")},
+            {"role", token_value(result.response, "ROLE")},
+            {"link", token_value(result.response, "LINK")},
+            {"federation peers", token_value(result.response, "PEERS")},
         };
         print_table({"FIELD", "VALUE"}, rows);
         return kExitOk;

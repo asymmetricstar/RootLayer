@@ -29,6 +29,17 @@ bool set_tap_media_status(bool connected);
 // Virtual TLD resolution. Both values come from the server registration
 // response (GATEWAY and TLD tokens); the client keeps no built-in address or
 // TLD list. An empty list removes every rule this client created.
+// Routes for the address blocks of the other federation servers (ROUTES token).
+// They point at the tunnel gateway, so traffic for a block that is not part of
+// this client's subnet still enters the tunnel. The client's own address, mask
+// and configuration never change; the set is reconciled on every server state,
+// so a server that joins or leaves adds or removes its route automatically.
+void apply_tunnel_routes(const std::vector<std::string>& prefixes);
+void clear_tunnel_routes();
+// True when the installed routes already match what the server reports.
+bool tunnel_routes_current(const std::string& gateway,
+                           const std::vector<std::string>& prefixes);
+
 void set_tunnel_dns_namespaces(const std::vector<std::string>& namespaces);
 void apply_tunnel_dns_rules(const std::string& gateway);
 void clear_tunnel_dns_rules();

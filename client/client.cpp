@@ -246,6 +246,11 @@ static int run_tunnel() {
                         configured_mask = tap_mask;
                         ip_applied = true;
                         prepare_tap_adapter(get_tap_adapter_name());
+                        // Re-apply the federation peer blocks after every address
+                        // change: netsh can drop static routes when the adapter
+                        // address is rewritten, and without them traffic to
+                        // another server's clients leaves through the physical NIC.
+                        apply_tunnel_routes(tunnel_routes);
                         // Bind the server's virtual TLDs to the server's gateway so
                         // the resolver asks the tunnel DNS server directly instead
                         // of timing out on the physical NIC's DNS server first.
@@ -270,6 +275,11 @@ static int run_tunnel() {
             // when the assigned address and the gateway stayed the same.
             if (!tunnel_dns_rules_current(gateway_ip)) {
                 apply_tunnel_dns_rules(gateway_ip);
+            }
+            // A server joining or leaving the link changes the ROUTES list in
+            // the next STATE answer; add/remove those routes without reconnecting.
+            if (!tunnel_routes_current(gateway_ip, tunnel_routes)) {
+                apply_tunnel_routes(tunnel_routes);
             }
         };
 
@@ -336,6 +346,7 @@ static int run_tunnel() {
     // Exit requested from the tray menu: close the devices so the tunnel
     // threads stop, then leave.
     clear_tunnel_dns_rules();
+    clear_tunnel_routes();
     set_tap_media_status(false);
 
     // Ends the session and removes the adapter; the pump threads above see the

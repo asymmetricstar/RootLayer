@@ -17,6 +17,7 @@
 #include "admin/admin.h"
 #include "core/log.h"
 #include "core/limits.h"
+#include "federation/federation.h"
 
 #include <algorithm>
 #include <cctype>
@@ -99,26 +100,48 @@ std::string server_network_state_tokens(const Session* session) {
     // carries the same token, so the panel is correct from the first frame.
     const std::string members = " MEMBERS:" + std::to_string(online_member_count());
 
-    if (!gateway_active.load()) {
-        return members + band_token(session) + motd_token();
+    std::string out = members;
+
+    if (gateway_active.load()) {
+        out += " GATEWAY:" + server_virtual_ip();
+        out += " MASK:" + ip_to_string(virtual_ip_mask);
+
+        // Virtual TLDs this server is authoritative for. The client turns them
+        // into NRPT rules pointing at GATEWAY, so only these names are sent to
+        // the tunnel DNS server; the address and the list both come from here,
+        // never from a hardcoded client default.
+        std::string tlds;
+        for (const auto& suffix : arpa_suffixes) {
+            if (suffix.empty()) continue;
+            if (!tlds.empty()) tlds += ",";
+            tlds += suffix;
+        }
+        if (!tlds.empty()) {
+            out += " TLD:" + tlds;
+        }
     }
 
-    std::string out = members + " GATEWAY:" + server_virtual_ip();
-    out += " MASK:" + ip_to_string(virtual_ip_mask);
+    // Federation: the address blocks owned by the other servers. The client
+    // installs one route per block through GATEWAY, so a packet for another
+    // server's client enters the tunnel even though that block is not part of
+    // its own subnet. No address, mask or configuration changes on the client;
+    // when a new server joins with a new block, its block shows up here on the
+    // next STATE answer and the route is added. Blocks already covered by the
+    // client's own subnet are left out (they are on-link anyway).
+    {
+        std::string routes;
+        std::set<std::string> seen;
+        for (const auto& peer : fed::peers()) {
+            if (peer.prefix.empty() || peer.prefix == fed::own_prefix()) continue;
+            if (!seen.insert(peer.prefix).second) continue;
+            if (!routes.empty()) routes += ",";
+            routes += peer.prefix;
+        }
+        if (!routes.empty()) {
+            out += " ROUTES:" + routes;
+        }
+    }
 
-    // Virtual TLDs this server is authoritative for. The client turns them into
-    // NRPT rules pointing at GATEWAY, so only these names are sent to the
-    // tunnel DNS server; the address and the list both come from here, never
-    // from a hardcoded client default.
-    std::string tlds;
-    for (const auto& suffix : arpa_suffixes) {
-        if (suffix.empty()) continue;
-        if (!tlds.empty()) tlds += ",";
-        tlds += suffix;
-    }
-    if (!tlds.empty()) {
-        out += " TLD:" + tlds;
-    }
     return out + band_token(session) + motd_token();
 }
 
@@ -145,6 +168,8 @@ void release_session(const std::shared_ptr<Session>& session) {
         // Remember the departure so the admin console can show "last seen"
         // for a client that is no longer online.
         note_client_seen(client_db_key(session->hw_id, session->identity));
+        // Tell the federation this address is gone, so peers stop sending to it.
+        fed::note_client_offline(session->virtual_ip);
         srvlog::event("CLOSED", session_label(session), session->virtual_ip, "session ended");
     }
 }
@@ -182,6 +207,18 @@ std::string handle_request(const std::string& request, const sockaddr_in& peer_a
         request.find("CA_CERT") != std::string::npos ||
         request.find("CA_CSR") != std::string::npos ||
         request.find("SRV_CERT") != std::string::npos) {
+        // LINKED mode has one trust root: the primary's CA. The replica asks
+        // the primary on the client's behalf, so a certificate issued for a
+        // name on one server validates on every server. When the primary is
+        // unreachable the local CA still answers, so DEGRADED mode keeps
+        // working with the trust material clients already have.
+        if (!fed::link_target.empty()) {
+            std::string proxied;
+            if (fed::certificate_proxy(request, proxied) && !proxied.empty()) {
+                return proxied;
+            }
+        }
+
         if (request.find("CA_CERT") != std::string::npos) {
             std::string pem = ca::ca_cert_pem();
             if (!pem.empty()) {
@@ -314,6 +351,13 @@ std::string handle_request(const std::string& request, const sockaddr_in& peer_a
                     return resp;
                 }
             }
+        }
+        // Federation: a replica asks its primary before answering not_found,
+        // so a name registered on another server resolves here too.
+        std::string remote_ip;
+        std::string remote_owner;
+        if (fed::lookup_name(arpa_query, remote_ip, &remote_owner) && !remote_ip.empty()) {
+            return "ARPA_IP:" + arpa_query + " ADDR:" + remote_ip;
         }
         return "ARPA_ERR:" + arpa_query + " CODE:not_found";
     }
@@ -491,6 +535,9 @@ std::string handle_request(const std::string& request, const sockaddr_in& peer_a
     srvlog::event("ASSIGN", session_label(new_session), new_session->virtual_ip,
                   kind + ", members " + std::to_string(member_count));
     note_client_seen(db_key);
+    // Publish the address in the federation location table (replicas forward
+    // it to the primary, which tells the other servers).
+    fed::note_client_online(new_session->virtual_ip, db_key);
 
     session = new_session;
     closes = false;  // the connection now carries the session keepalive

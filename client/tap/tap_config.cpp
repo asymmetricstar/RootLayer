@@ -311,3 +311,124 @@ bool tunnel_dns_rules_current(const std::string& gateway) {
     return g_dns_rules_may_exist && g_applied_gateway == gateway &&
            g_applied_namespaces == wanted;
 }
+
+// --- Federation peer routes ------------------------------------------------
+//
+// The server announces every other server's address block in the ROUTES token
+// (registration response and STATE answer). A client whose mask is a /24 does
+// not see a remote /24 as on-link, so Windows would send that traffic to the
+// physical NIC and the federation link would never see it. One route per peer
+// block through the tunnel gateway fixes that without changing the client's
+// own address or mask. The same mechanism also handles a server that joins
+// later: the next STATE answer carries its block and the route is added.
+
+// A private metric marks the routes created here, so a reconfiguration can
+// remove exactly those routes without touching the adapter's default route
+// (metric 50, set in configure_tap_adapter) or its on-link route.
+static const int kFederationRouteMetric = 42;
+
+static std::string g_route_gateway;
+static std::vector<std::string> g_applied_routes;
+// Rules from an earlier process are assumed to exist until reconciled once.
+static bool g_routes_may_exist = true;
+
+// Only "a.b.c.d/len" may reach the command line. Peer prefixes come from the
+// server, but a malformed announcement must never become a powershell
+// argument.
+static bool valid_prefix(const std::string& text) {
+    const size_t slash = text.find('/');
+    if (slash == std::string::npos || text.find('/', slash + 1) != std::string::npos) {
+        return false;
+    }
+    unsigned int octet[4] = {0, 0, 0, 0};
+    char tail = 0;
+    if (std::sscanf(text.substr(0, slash).c_str(), "%u.%u.%u.%u%c", &octet[0], &octet[1],
+                    &octet[2], &octet[3], &tail) != 4) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (octet[i] > 255) return false;
+    }
+    const std::string length_text = text.substr(slash + 1);
+    if (length_text.empty()) return false;
+    for (char c : length_text) {
+        if (!isdigit((unsigned char)c)) return false;
+    }
+    const int length = std::atoi(length_text.c_str());
+    return length >= 0 && length <= 32;
+}
+
+static std::vector<std::string> validated_prefixes(const std::vector<std::string>& prefixes) {
+    std::vector<std::string> accepted;
+    for (const auto& text : prefixes) {
+        if (!valid_prefix(text)) continue;
+        bool duplicate = false;
+        for (const auto& saved : accepted) {
+            if (saved == text) { duplicate = true; break; }
+        }
+        if (!duplicate) accepted.push_back(text);
+    }
+    return accepted;
+}
+
+// Removes only the routes this function ever installs: same tunnel adapter and
+// the dedicated metric. The 0.0.0.0/0 default route is excluded explicitly.
+static std::string remove_federation_routes_script(const std::string& adapter) {
+    return "Get-NetRoute -InterfaceAlias '" + adapter +
+           "' -ErrorAction SilentlyContinue | Where-Object { $_.RouteMetric -eq " +
+           std::to_string(kFederationRouteMetric) +
+           " -and $_.DestinationPrefix -ne '0.0.0.0/0' } | "
+           "Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue;";
+}
+
+bool tunnel_routes_current(const std::string& gateway,
+                           const std::vector<std::string>& prefixes) {
+    const std::vector<std::string> wanted = validated_prefixes(prefixes);
+    if (g_routes_may_exist) return false;
+    return g_route_gateway == gateway && g_applied_routes == wanted;
+}
+
+void apply_tunnel_routes(const std::vector<std::string>& prefixes) {
+    const std::string adapter = get_tap_adapter_name();
+    const bool usable = !adapter.empty() && !gateway_ip.empty() &&
+                        inet_addr(gateway_ip.c_str()) != INADDR_NONE;
+    const std::vector<std::string> wanted =
+        usable ? validated_prefixes(prefixes) : std::vector<std::string>();
+
+    // Always reconcile when called: an adapter address rewrite can drop the
+    // routes even though the reported set did not change. The STATE path only
+    // calls this when tunnel_routes_current() says the set is stale, so this
+    // does not run on every keepalive.
+    std::string script;
+    if (g_routes_may_exist || !g_applied_routes.empty()) {
+        script = remove_federation_routes_script(adapter);
+    }
+    for (const auto& prefix : wanted) {
+        script += " New-NetRoute -DestinationPrefix '" + prefix + "' -InterfaceAlias '" + adapter +
+                  "' -NextHop '" + gateway_ip + "' -RouteMetric " +
+                  std::to_string(kFederationRouteMetric) + " -ErrorAction SilentlyContinue;";
+    }
+    if (!script.empty() && !run_powershell(script)) {
+        json_event("error", "\"code\":\"federation_routes_failed\"");
+        return;
+    }
+
+    g_routes_may_exist = false;
+    g_route_gateway = usable ? gateway_ip : std::string();
+    g_applied_routes = wanted;
+    if (!wanted.empty()) {
+        json_event("federation_routes_set", json_string_field("gateway", gateway_ip) + "," +
+                                                json_number_field("count", (long long)wanted.size()));
+    }
+}
+
+void clear_tunnel_routes() {
+    if (!g_routes_may_exist) return;
+    const std::string adapter = get_tap_adapter_name();
+    if (adapter.empty()) return;
+    if (run_powershell(remove_federation_routes_script(adapter))) {
+        g_routes_may_exist = false;
+        g_route_gateway.clear();
+        g_applied_routes.clear();
+    }
+}

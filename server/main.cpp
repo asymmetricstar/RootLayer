@@ -15,6 +15,7 @@
 #include "core/log.h"
 #include "core/guard.h"
 #include "core/limits.h"
+#include "federation/federation.h"
 #include "service/winservice.h"
 
 const int kStartupSteps = 8;
@@ -184,7 +185,11 @@ static int run_server() {
     }
     startup_ok();
 
-    startup_begin(8, "Starting relay, DNS and session workers");
+    startup_begin(8, "Starting relay, DNS, federation and session workers");
+    // Federation: peering listener + data socket, and the link to the primary
+    // when server.ini carries `link=<ip>`. A failure here only disables the
+    // server-to-server paths; the local network keeps working.
+    fed::start();
     std::thread(relay_thread).detach();
     // DNS name server for *.p2p (UDP + TCP 53) - answers from domain.db.
     // TCP is what a resolver falls back to when a UDP answer is truncated.
@@ -239,6 +244,7 @@ static int run_server() {
     } else {
         srvlog::item("DNS", "disabled");
     }
+    srvlog::item("Federation", fed::status_tokens());
     srvlog::item("Certificate", ca::status());
     srvlog::item("Write buffer", db_write_stats() + " | " + arpa_write_stats());
     srvlog::item("Shield", guard::stats());
@@ -270,6 +276,7 @@ static int run_server() {
     // can only stall its own connection. Returns when the server stops.
     signaling_run(listen_sock);
 
+    fed::stop();
     relay_running = false;
     closesocket(listen_sock);
     closesocket(relay_sock);

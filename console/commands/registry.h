@@ -42,6 +42,7 @@ void register_server_commands();
 void register_limit_commands();
 void register_ip_commands();
 void register_config_commands();
+void register_link_commands();
 
 void print_help();
 void print_usage(const Command& command);

@@ -5,6 +5,7 @@
 #include "core/guard.h"
 #include "core/limits.h"
 #include "core/utils.h"
+#include "federation/federation.h"
 
 namespace {
 
@@ -61,6 +62,24 @@ bool ensure_server_ini_exists(const std::string& ini_file) {
             out << "tap_gateway=1\n\n";
             out << "# NAT the virtual network to the internet (admin + WinNat required)\n";
             out << "nat=0\n\n";
+            out << "# ---- Federation (server to server, clients never change) ---------\n";
+            out << "# link: empty or false = this server runs on its own (SINGLE mode).\n";
+            out << "# An IPv4 address makes it a replica of that primary server.\n";
+            out << "link=\n\n";
+            out << "# Peering control (TCP) and federation data (UDP) ports. A SINGLE\n";
+            out << "# server always accepts replicas on link_port.\n";
+            out << "link_port=40002\n";
+            out << "# Port of the primary server, when it differs (NAT / port forward).\n";
+            out << "#link_primary_port=40002\n";
+            out << "link_data_port=40003\n\n";
+            out << "# Unique name of this server in the federation. Empty = derived\n";
+            out << "# from the gateway address (srv-10-10-1-1).\n";
+            out << "link_id=\n\n";
+            out << "# Shared secret both sides must use. Empty = the handshake is\n";
+            out << "# not authenticated; set the same value on every server.\n";
+            out << "link_secret=\n\n";
+            out << "# Remote name/location cache lifetime in seconds.\n";
+            out << "link_cache_ttl_sec=60\n\n";
             out << "# Local Area IP the server binds to (example: 192.168.1.101).\n";
             out << "# Empty = listen on every interface (0.0.0.0). Relay + signaling use it.\n";
             out << "local_ip=\n\n";
@@ -327,6 +346,10 @@ bool load_server_config_from_ini(const std::string& ini_file) {
     virtual_ip_first_client = first;
     virtual_ip_last = last;
 
+    // Federation settings live in their own module: link target/role, peering
+    // ports, this server's identity and the shared secret.
+    fed::load_settings(ini_full_path);
+
     std::cout << "Server Configuration loaded from: " << ini_full_path << std::endl;
     std::cout << "Listening Port: " << signaling_port << std::endl;
     std::cout << "Relay Port: " << relay_port << std::endl;
@@ -343,6 +366,13 @@ bool load_server_config_from_ini(const std::string& ini_file) {
     } else {
         std::cout << "Client Pool: empty" << std::endl;
     }
+    std::cout << "Federation: "
+              << (fed::link_target.empty()
+                      ? std::string("single (primary) on TCP ") + std::to_string(fed::link_port)
+                      : std::string("linked to ") + fed::link_target + ":" +
+                            std::to_string(fed::link_primary_port))
+              << ", data UDP " << fed::link_data_port << ", id " << fed::link_id
+              << std::endl;
     std::cout << "TLD suffixes: ";
     for (const auto& suf : arpa_suffixes) {
         std::cout << "." << suf << " ";

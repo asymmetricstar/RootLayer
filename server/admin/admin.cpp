@@ -39,6 +39,7 @@
 #include "core/limits.h"
 #include "db/store.h"
 #include "session/session.h"
+#include "federation/federation.h"
 
 #include <algorithm>
 #include <cctype>
@@ -139,6 +140,13 @@ const ConfigKey kConfigKeys[] = {
     {"guard_source_table", true},
     {"guard_source_idle_sec", true},
     {"guard_log_interval_sec", true},
+    {"link", true},
+    {"link_port", false},
+    {"link_primary_port", false},
+    {"link_data_port", false},
+    {"link_id", false},
+    {"link_secret", false},
+    {"link_cache_ttl_sec", true},
     {"listening_port", false},
     {"relay_port", false},
     {"local_ip", false},
@@ -211,7 +219,37 @@ bool validate_config_value(const std::string& key, const std::string& value,
         *error = "bad_ip";
         return false;
     }
-    if (key == "listening_port" || key == "relay_port") {
+    if (key == "link") {
+        // Empty / false returns the server to SINGLE mode; an address links it.
+        if (value.empty() || value == "0" || value == "false" || value == "off" ||
+            value == "no") {
+            return true;
+        }
+        if (valid_ipv4(value)) return true;
+        *error = "bad_ip";
+        return false;
+    }
+    if (key == "link_secret") {
+        return true;  // free text, empty disables authentication
+    }
+    if (key == "link_id") {
+        if (value.empty()) return true;
+        for (char c : value) {
+            if (!isalnum((unsigned char)c) && c != '-' && c != '_' && c != '.') {
+                *error = "bad_id";
+                return false;
+            }
+        }
+        return value.size() <= 32 ? true : (*error = "bad_id", false);
+    }
+    if (key == "link_cache_ttl_sec") {
+        const int ttl = all_digits(value) ? std::atoi(value.c_str()) : -1;
+        if (ttl >= 1 && ttl <= 3600) return true;
+        *error = "bad_number";
+        return false;
+    }
+    if (key == "link_port" || key == "link_primary_port" || key == "link_data_port" ||
+        key == "listening_port" || key == "relay_port") {
         const int port = all_digits(value) ? std::atoi(value.c_str()) : -1;
         if (port >= 1 && port <= 65535) return true;
         *error = "bad_port";
@@ -318,7 +356,51 @@ bool admin_request(const std::string& request, std::string& response) {
                       " TLDS:" + tld_csv() +
                       " GATEWAY:" + server_virtual_ip() +
                       " CA:" + ca::fingerprint() +
-                      " CERTS:" + std::to_string(ca::issued_subjects().size()));
+                      " CERTS:" + std::to_string(ca::issued_subjects().size()) +
+                      " " + fed::status_tokens());
+        return true;
+    }
+
+    // ---- federation / link -------------------------------------------
+    // All of these act on the RUNNING server only; the console still has to
+    // run on the server host (admin_peer_allowed).
+    if (command == "LINK_STATUS" || command == "FED_STATUS") {
+        response = ok(fed::status_tokens());
+        return true;
+    }
+
+    if (command == "FED_PEERS") {
+        const std::string csv = fed::peers_csv();
+        const size_t count =
+            csv.empty() ? 0 : (size_t)std::count(csv.begin(), csv.end(), ';') + 1;
+        response = ok("COUNT:" + std::to_string(count) + " PEERS:" + csv);
+        return true;
+    }
+
+    if (command == "LINK_CONNECT") {
+        const std::string ip = token_value(rest, "IP");
+        int port = token_int(rest, "PORT", fed::link_primary_port);
+        if (ip.empty()) {
+            response = fail("missing_argument");
+            return false;
+        }
+        std::string error;
+        if (!fed::link_connect(ip, port, error)) {
+            response = fail(error.empty() ? "link_failed" : error);
+            return false;
+        }
+        response = ok("LINK:" + ip + ":" + std::to_string(port) + " STATUS:" +
+                      fed::mode_name());
+        return true;
+    }
+
+    if (command == "LINK_DISCONNECT") {
+        std::string error;
+        if (!fed::link_disconnect(error)) {
+            response = fail(error.empty() ? "link_failed" : error);
+            return false;
+        }
+        response = ok("STATUS:" + fed::mode_name());
         return true;
     }
 
@@ -362,12 +444,29 @@ bool admin_request(const std::string& request, std::string& response) {
             identity = "admin.server";
         }
 
+        // A replica does not own the global name space: the write is forwarded
+        // to the primary and only counts once the primary accepts it.
+        if (!fed::link_target.empty()) {
+            std::string error;
+            std::string canonical;
+            if (!fed::name_add(name, ip, ttl, identity, error, &canonical, info)) {
+                response = fail(error.empty() ? "primary_refused" : error);
+                return false;
+            }
+            response = ok("NAME:" + (canonical.empty() ? name : canonical) + " IP:" + ip +
+                          " TTL:" + std::to_string(ttl) + " OWNER:" + identity +
+                          " VIA:primary");
+            return true;
+        }
+
         std::string canonical;
         const std::string result = arpa_set(name, identity, ip, ttl, info, &canonical);
         if (result != "ok") {
             response = fail(result);
             return false;
         }
+        // A primary owns the global name space: every replica gets the change.
+        fed::announce_name(canonical, ip, ttl, identity, info);
         response = ok("NAME:" + canonical + " IP:" + ip + " TTL:" + std::to_string(ttl) +
                       " OWNER:" + identity);
         return true;
@@ -379,10 +478,20 @@ bool admin_request(const std::string& request, std::string& response) {
             response = fail("missing_argument");
             return false;
         }
+        if (!fed::link_target.empty()) {
+            std::string error;
+            if (!fed::name_del(name, error)) {
+                response = fail(error.empty() ? "primary_refused" : error);
+                return false;
+            }
+            response = ok("NAME:" + name + " VIA:primary");
+            return true;
+        }
         if (!arpa_delete(name)) {
             response = fail("not_found");
             return false;
         }
+        fed::announce_name_delete(name);
         response = ok("NAME:" + name);
         return true;
     }
@@ -673,6 +782,20 @@ bool admin_request(const std::string& request, std::string& response) {
             limits::set_defaults(up, down);
         } else if (key.rfind("guard_", 0) == 0) {
             apply_guard_setting(key, std::atoi(value.c_str()));
+        } else if (key == "link") {
+            // Applying `link` moves the running server between SINGLE and
+            // LINKED without a restart (the console's `link connect` uses the
+            // dedicated command; this keeps `config set link` consistent).
+            std::string error;
+            if (value.empty() || value == "0" || value == "false" || value == "off" ||
+                value == "no") {
+                if (!fed::link_target.empty()) fed::link_disconnect(error);
+            } else if (!fed::link_connect(value, fed::link_primary_port, error)) {
+                response = fail(error.empty() ? "link_failed" : error);
+                return false;
+            }
+        } else if (key == "link_cache_ttl_sec") {
+            fed::cache_ttl_sec = std::atoi(value.c_str());
         }
 
         response = ok("KEY:" + key + " VALUE:" + encode_field(value) +

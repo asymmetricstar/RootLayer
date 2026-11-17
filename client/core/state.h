@@ -40,6 +40,12 @@ extern std::atomic<int> band_down_kbps;
 // panel header. Empty = the server has no message.
 extern std::string server_motd;
 
+// Address blocks owned by the other federation servers. They arrive in the
+// ROUTES token of the registration response and of every STATE answer, and are
+// installed as routes through GATEWAY so remote clients are reachable even
+// when this client's own mask does not cover their block.
+extern std::vector<std::string> tunnel_routes;
+
 // The server keeps a client's address, so the hardware id alone identifies it.
 
 // Permanent 48-bit hardware id of this client in MAC notation

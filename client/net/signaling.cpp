@@ -106,18 +106,29 @@ bool update_relay_address() {
 // Splits the comma separated TLD list the server reports and hands it to the
 // resolver rule set. An empty list means "no tunnel TLDs": every rule is
 // removed, so nothing from an earlier connection can survive.
-static void apply_tld_list(const std::string& tlds) {
-    std::vector<std::string> suffixes;
+static std::vector<std::string> split_comma_list(const std::string& text) {
+    std::vector<std::string> values;
     size_t start = 0;
-    while (start <= tlds.size()) {
-        size_t comma = tlds.find(',', start);
-        if (comma == std::string::npos) comma = tlds.size();
-        std::string suffix = trim(tlds.substr(start, comma - start));
-        if (!suffix.empty()) suffixes.push_back(suffix);
-        if (comma >= tlds.size()) break;
+    while (start <= text.size()) {
+        size_t comma = text.find(',', start);
+        if (comma == std::string::npos) comma = text.size();
+        std::string value = trim(text.substr(start, comma - start));
+        if (!value.empty()) values.push_back(value);
+        if (comma >= text.size()) break;
         start = comma + 1;
     }
-    set_tunnel_dns_namespaces(suffixes);
+    return values;
+}
+
+static void apply_tld_list(const std::string& tlds) {
+    set_tunnel_dns_namespaces(split_comma_list(tlds));
+}
+
+// Peer address blocks announced by the server. Stored here and installed by
+// the tunnel loop, because a changed adapter address can wipe static routes
+// and the routes have to be re-applied together with the TAP configuration.
+static void apply_route_list(const std::string& routes) {
+    tunnel_routes = split_comma_list(routes);
 }
 
 // Applies a "STATE GATEWAY:.. MASK:.. TLD:.. MEMBERS:.." line the server pushes
@@ -130,6 +141,7 @@ static void apply_control_state(const std::string& line) {
         tap_mask = mask;
     }
     apply_tld_list(token_value(line, "TLD"));
+    apply_route_list(token_value(line, "ROUTES"));
 
     // Peer count, refreshed on every keepalive answer: a member that joins or
     // leaves after this client connected still reaches its panel.
@@ -255,6 +267,7 @@ bool request_peer() {
     // never assumed: it is taken from the server, and an empty answer means the
     // client must not keep any tunnel DNS rule.
     apply_tld_list(token_value(response, "TLD"));
+    apply_route_list(token_value(response, "ROUTES"));
 
     // CA fingerprint of the server we are talking to. When it differs from the
     // CA we enrolled against (server restarted, new in-memory CA), the cached

@@ -1,7 +1,6 @@
 # RootLayer Federation (Server-to-Server Peering)
 
-Status: **implemented (v1.0).** The decisions in the design document
-`docs/plans/server-peering.md` remain valid for this implementation; this file
+Status: **implemented (v1.0).** The decisions in this file
 describes the code and how to use it.
 
 Goal: clients of multiple RootLayer servers such as A, B, and C should work as a

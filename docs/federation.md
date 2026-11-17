@@ -1,4 +1,4 @@
-# RootLayer Federation (Server-to-Server Peering)
+# RootLayer Federation (Server-to-Server Peer)
 
 clients of multiple RootLayer servers such as A, B, and C should work as a
 single virtual network **without any changes to the clients**. A client still

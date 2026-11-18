@@ -8,7 +8,7 @@ RootLayer is a Windows & Linux focused, software-defined networking (SDN) projec
 
 - 💾 [win-x64-Server](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.6/build-server-1.0.6-x64-win.zip)
 - 💾 [win-x64-Client](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.6/build-client-1.0.6-x64-win.zip)
-
+- 💾 [linux-client & server](https://github.com/asymmetricstar/RootLayer/releases/download/v1.0.6/build-all-ver-1.0.6-x64-linux.tar.gz)
 
 ## Documentation
 
